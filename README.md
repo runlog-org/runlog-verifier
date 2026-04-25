@@ -28,3 +28,24 @@ Tamper-evident, reproducible-build binary distributed via package managers (`bre
 
 - Reproducible: `-trimpath`, `-buildvcs=false`, pinned Go toolchain
 - Checksummed releases verified across macOS/Linux/Windows before publishing
+
+## Build
+
+First-time setup on a fresh machine:
+
+    cd verifier/
+    go mod tidy        # writes go.sum
+    make build         # writes bin/runlog-verifier
+    make test          # roundtrip + fingerprint coverage
+
+Reproducible-build flags (`-trimpath -buildvcs=false`) are wired into
+the Makefile. CI publishing reproducible binaries is deferred to the
+first Phase 2 release.
+
+## CLI status
+
+v0.1 stub: structural validation + fingerprint capture + signed bundle.
+Differential execution (§5.3) and mutation testing (§5.3) are the
+next Phase 2 deliverables — not yet implemented. The CLI's output
+shape is stable and the server's `verification_signature` parameter
+already accepts (and ignores) bundles in this format.
