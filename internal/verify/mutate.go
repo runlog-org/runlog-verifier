@@ -41,6 +41,8 @@ var supportedStrategies = map[string]struct{}{
 	"mutate_fixture":     {},
 	"swap_function_call": {},
 	"swap_identifier":    {},
+	"remove_kwarg":       {},
+	"drop_flag":          {},
 }
 
 // runMutations applies each declared mutation and verifies the actual outcome
@@ -74,14 +76,15 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 		return []Reason{{
 			Code: "mutation_strategy_unsupported",
 			Message: fmt.Sprintf(
-				"mutation #%d strategy %q is not yet implemented; supported in this build: set_literal_value, mutate_fixture, swap_function_call, swap_identifier",
+				"mutation #%d strategy %q is not yet implemented; supported in this build: set_literal_value, mutate_fixture, swap_function_call, swap_identifier, remove_kwarg, drop_flag",
 				idx+1, m.Strategy,
 			),
 		}}, false
 	}
 
 	isInputStrategy := m.Strategy == "set_literal_value" || m.Strategy == "mutate_fixture"
-	isSourceStrategy := m.Strategy == "swap_function_call" || m.Strategy == "swap_identifier"
+	isSwapStrategy := m.Strategy == "swap_function_call" || m.Strategy == "swap_identifier"
+	isRemoveStrategy := m.Strategy == "remove_kwarg" || m.Strategy == "drop_flag"
 
 	branches := branchesFor(m)
 	var reasons []Reason
@@ -123,8 +126,20 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			}
 			mutInputs = subst
 			mutAction = action
-		case isSourceStrategy:
+		case isSwapStrategy:
 			rewritten, err := applySourceMutation(action, m)
+			if err != nil {
+				reasons = append(reasons, Reason{
+					Code: "mutation_target_invalid",
+					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
+						idx+1, m.Strategy, branch, err),
+				})
+				continue
+			}
+			mutAction = rewritten
+			mutInputs = inputs
+		case isRemoveStrategy:
+			rewritten, err := applyRemoveMutation(action, m)
 			if err != nil {
 				reasons = append(reasons, Reason{
 					Code: "mutation_target_invalid",
@@ -139,12 +154,23 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 
 		got, err := runner.RunPython(setup, mutAction, mutInputs, b.timeout)
 		if err != nil {
-			reasons = append(reasons, Reason{
-				Code: "mutation_runner_error",
-				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-					idx+1, m.Strategy, branch, err),
-			})
-			continue
+			if errors.Is(err, runner.ErrTimeout) || errors.Is(err, runner.ErrInterpreterMissing) {
+				reasons = append(reasons, Reason{
+					Code: "mutation_runner_error",
+					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
+						idx+1, m.Strategy, branch, err),
+				})
+				continue
+			}
+			// Generic subprocess crash (SyntaxError after a remove mutation,
+			// runtime segfault, OOM kill). Treat as the test failing —
+			// synthesize a raised ExecResult so the existing outcome
+			// classifier produces outcomeFail.
+			got = runner.ExecResult{
+				Raised:    true,
+				Exception: "SubprocessError",
+				Message:   err.Error(),
+			}
 		}
 
 		actual := classifyOutcome(branch, got, baselineRes, b.diff)
@@ -339,6 +365,33 @@ func applySourceMutation(steps []runner.Step, m Mutation) ([]runner.Step, error)
 			Type: s.Type,
 			Lang: s.Lang,
 			Body: re.ReplaceAllString(s.Body, replacement),
+		}
+	}
+	return out, nil
+}
+
+// applyRemoveMutation removes every occurrence of the resolved token from
+// the target branch's action source. Both remove_kwarg and drop_flag share
+// the same mechanic — v0.1 is intentionally not syntax-aware about commas
+// or whitespace cleanup. Submitters pick tokens that produce the intended
+// post-removal source; tokens that leave invalid syntax cause the subprocess
+// to crash, which the runner-error classifier in runOneMutation surfaces as
+// outcomeFail (the mutation broke the test, which is what expected_result:
+// fail is asserting).
+//
+// Token resolution reuses resolveSwapToken (m.Token if non-empty; else
+// m.Target when not branch-path-prefixed; else error).
+func applyRemoveMutation(steps []runner.Step, m Mutation) ([]runner.Step, error) {
+	token, err := resolveSwapToken(m)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]runner.Step, len(steps))
+	for i, s := range steps {
+		out[i] = runner.Step{
+			Type: s.Type,
+			Lang: s.Lang,
+			Body: strings.ReplaceAll(s.Body, token, ""),
 		}
 	}
 	return out, nil
