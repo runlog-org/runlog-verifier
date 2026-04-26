@@ -146,6 +146,108 @@ func TestRunPythonUnsupportedLang(t *testing.T) {
 	}
 }
 
+func TestRunPythonReturnsListWithLength(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(nil, []Step{{Type: "code", Lang: "python", Body: "$RESULT = [1, 2, 3]"}}, nil, 5)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.Length == nil || *res.Length != 3 {
+		t.Fatalf("length=%v, want *3", res.Length)
+	}
+	want := []string{"int", "int", "int"}
+	if len(res.ElementTypes) != len(want) {
+		t.Fatalf("element_types=%v, want %v", res.ElementTypes, want)
+	}
+	for i, v := range want {
+		if res.ElementTypes[i] != v {
+			t.Fatalf("element_types[%d]=%q, want %q", i, res.ElementTypes[i], v)
+		}
+	}
+}
+
+func TestRunPythonReturnsStringWithLength(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(nil, []Step{{Type: "code", Lang: "python", Body: `$RESULT = "hello"`}}, nil, 5)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.Length == nil || *res.Length != 5 {
+		t.Fatalf("length=%v, want *5", res.Length)
+	}
+	if res.ElementTypes != nil {
+		t.Fatalf("element_types=%v, want nil (string excluded)", res.ElementTypes)
+	}
+}
+
+func TestRunPythonReturnsDictWithLength(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(nil, []Step{{Type: "code", Lang: "python", Body: `$RESULT = {"a": 1, "b": 2}`}}, nil, 5)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.Length == nil || *res.Length != 2 {
+		t.Fatalf("length=%v, want *2", res.Length)
+	}
+	if res.ElementTypes != nil {
+		t.Fatalf("element_types=%v, want nil (dict excluded)", res.ElementTypes)
+	}
+}
+
+func TestRunPythonReturnsIntNoLength(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(nil, []Step{{Type: "code", Lang: "python", Body: "$RESULT = 42"}}, nil, 5)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.Length != nil {
+		t.Fatalf("length=%v, want nil (int has no len())", *res.Length)
+	}
+	if res.ElementTypes != nil {
+		t.Fatalf("element_types=%v, want nil", res.ElementTypes)
+	}
+}
+
+func TestRunPythonReturnsListOfMixedTypes(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(
+		nil,
+		[]Step{{Type: "code", Lang: "python", Body: `$RESULT = [1, "x", 3.14, ValueError("oops")]`}},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.Length == nil || *res.Length != 4 {
+		t.Fatalf("length=%v, want *4", res.Length)
+	}
+	want := []string{"int", "str", "float", "ValueError"}
+	if len(res.ElementTypes) != len(want) {
+		t.Fatalf("element_types=%v, want %v", res.ElementTypes, want)
+	}
+	for i, v := range want {
+		if res.ElementTypes[i] != v {
+			t.Fatalf("element_types[%d]=%q, want %q", i, res.ElementTypes[i], v)
+		}
+	}
+}
+
 func TestBuildPythonScriptDeterministic(t *testing.T) {
 	// Two equal inputs maps must produce byte-identical scripts so the
 	// fingerprint of a bundle stays stable across re-runs.

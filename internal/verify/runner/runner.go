@@ -46,6 +46,8 @@ type ExecResult struct {
 	JSONValue    json.RawMessage `json:"json_value,omitempty"`
 	Serializable bool            `json:"json_serializable,omitempty"`
 	Repr         string          `json:"repr,omitempty"`
+	Length       *int            `json:"length,omitempty"`
+	ElementTypes []string        `json:"element_types,omitempty"`
 }
 
 // Errors returned by RunPython. Callers map these to verify.Reason codes
@@ -202,6 +204,22 @@ try:
     _ok = True
 except Exception:
     _ok = False
+_length = None
+try:
+    _length = len(_v_RESULT)
+except Exception:
+    pass
+
+_element_types = None
+# Iterate only true sequences/sets — exclude strings (would yield char types)
+# and mappings (would yield key types). Bytes/bytearray excluded for the same
+# reason as strings.
+if not isinstance(_v_RESULT, (str, bytes, bytearray, dict)):
+    try:
+        _element_types = [type(x).__name__ for x in _v_RESULT]
+    except Exception:
+        _element_types = None
+
 _outcome = {
     "raised": False,
     "type": type(_v_RESULT).__name__,
@@ -209,6 +227,10 @@ _outcome = {
     "json_serializable": _ok,
     "repr": repr(_v_RESULT),
 }
+if _length is not None:
+    _outcome["length"] = _length
+if _element_types is not None:
+    _outcome["element_types"] = _element_types
 sys.stdout.write(json.dumps(_outcome))
 `)
 
