@@ -5,22 +5,78 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/runlog/verifier/internal/verify/runner"
 )
 
-// mutationBaseline captures the un-mutated execution context for a unit/function
-// run so mutations can be applied as deltas. Each branch's setup, action,
-// inputs, and baseline ExecResult are kept side-by-side; runOneMutation pulls
-// the per-branch slice based on the mutation's branch field.
+// branchKind enumerates which branch a mutation targets. Stringly-typed
+// "failed_approach" / "working_approach" / "both" / "" remain the wire
+// representation in YAML, but inside the verify package we route on a typed
+// enum so callers can't accidentally mistype the constant.
+type branchKind int
+
+const (
+	branchUnknown branchKind = iota
+	branchFailed
+	branchWorking
+)
+
+// String renders a branchKind back to the schema-side YAML key. matchOutcome
+// and the schema's expected_branch_outcome map keys remain string-valued, so
+// the verifier round-trips through the wire form at the boundary.
+func (k branchKind) String() string {
+	switch k {
+	case branchFailed:
+		return "failed_approach"
+	case branchWorking:
+		return "working_approach"
+	}
+	return "unknown"
+}
+
+// parseBranchKind maps a schema-side branch key to its enum. ok is false for
+// unknown values (including ""), letting callers degrade gracefully.
+func parseBranchKind(s string) (branchKind, bool) {
+	switch s {
+	case "failed_approach":
+		return branchFailed, true
+	case "working_approach":
+		return branchWorking, true
+	}
+	return branchUnknown, false
+}
+
+// branchBaseline captures one branch's un-mutated execution context so a
+// mutation can be applied as a delta against it.
+type branchBaseline struct {
+	Setup  []runner.Step
+	Action []runner.Step
+	Inputs map[string]any
+	Result runner.ExecResult
+}
+
+// mutationBaseline pairs the per-branch baselines for a unit/function run with
+// the differential spec and the per-run timeout. runOneMutation pulls the
+// per-branch slice via byBranch.
 type mutationBaseline struct {
-	failedSetup, failedAction   []runner.Step
-	workingSetup, workingAction []runner.Step
-	failedInputs, workingInputs map[string]any
-	failedRes, workingRes       runner.ExecResult
-	diff                        map[string]any
-	timeout                     float64
+	Failed  branchBaseline
+	Working branchBaseline
+	Diff    map[string]any
+	Timeout float64
+}
+
+// byBranch returns the per-branch baseline for k. ok is false for unknown
+// kinds, mirroring the previous selectBranch helper.
+func (b mutationBaseline) byBranch(k branchKind) (branchBaseline, bool) {
+	switch k {
+	case branchFailed:
+		return b.Failed, true
+	case branchWorking:
+		return b.Working, true
+	}
+	return branchBaseline{}, false
 }
 
 // mutationOutcome is the classified result of applying a mutation to one
@@ -34,15 +90,73 @@ const (
 	outcomeUnchanged mutationOutcome = "unchanged"
 )
 
-// supportedStrategies lists the strategies this verifier slice can actually
-// apply. Anything else degrades the entry to tier_unsupported.
-var supportedStrategies = map[string]struct{}{
-	"set_literal_value":  {},
-	"mutate_fixture":     {},
-	"swap_function_call": {},
-	"swap_identifier":    {},
-	"remove_kwarg":       {},
-	"drop_flag":          {},
+// strategy applies one mutation to a per-branch baseline and returns the
+// mutated inputs and action that should be re-run. The baseline is read-only;
+// implementations MUST NOT mutate b.Inputs or b.Action — they return fresh
+// maps/slices so the caller can re-run baseline branches independently.
+type strategy interface {
+	apply(b branchBaseline, m Mutation) (mutInputs map[string]any, mutAction []runner.Step, err error)
+}
+
+// inputSubstStrategy covers set_literal_value and mutate_fixture: the
+// mutation rebinds a $-prefixed input key to a new value.
+type inputSubstStrategy struct{}
+
+func (inputSubstStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, error) {
+	inputs, err := applyInputSubstitution(b.Inputs, m.Target, m.NewValue)
+	if err != nil {
+		return nil, nil, err
+	}
+	return inputs, b.Action, nil
+}
+
+// sourceSubstStrategy covers swap_function_call and swap_identifier: the
+// mutation rewrites a token in the action source via word-boundary
+// substitution.
+type sourceSubstStrategy struct{}
+
+func (sourceSubstStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, error) {
+	action, err := applySourceMutation(b.Action, m)
+	if err != nil {
+		return nil, nil, err
+	}
+	return b.Inputs, action, nil
+}
+
+// sourceRemoveStrategy covers remove_kwarg and drop_flag: the mutation
+// strips every occurrence of a token from the action source.
+type sourceRemoveStrategy struct{}
+
+func (sourceRemoveStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, error) {
+	action, err := applyRemoveMutation(b.Action, m)
+	if err != nil {
+		return nil, nil, err
+	}
+	return b.Inputs, action, nil
+}
+
+// strategies is the single source of truth for which strategy names this
+// verifier slice supports. Adding a new strategy is a one-line registry edit
+// plus one apply method.
+var strategies = map[string]strategy{
+	"set_literal_value":  inputSubstStrategy{},
+	"mutate_fixture":     inputSubstStrategy{},
+	"swap_function_call": sourceSubstStrategy{},
+	"swap_identifier":    sourceSubstStrategy{},
+	"remove_kwarg":       sourceRemoveStrategy{},
+	"drop_flag":          sourceRemoveStrategy{},
+}
+
+// supportedStrategiesMessage renders the sorted list of registered strategy
+// names for inclusion in the mutation_strategy_unsupported Reason — keeps the
+// message stable and self-updating when new strategies land.
+func supportedStrategiesMessage() string {
+	names := make([]string, 0, len(strategies))
+	for name := range strategies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // runMutations applies each declared mutation and verifies the actual outcome
@@ -72,35 +186,43 @@ func runMutations(e *Entry, b mutationBaseline) ([]Reason, bool) {
 // declared expectation. The bool return is false when the strategy is not
 // implemented in this build, signalling tier_unsupported to the caller.
 func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason, bool) {
-	if _, ok := supportedStrategies[m.Strategy]; !ok {
+	strat, ok := strategies[m.Strategy]
+	if !ok {
 		return []Reason{{
 			Code: "mutation_strategy_unsupported",
 			Message: fmt.Sprintf(
-				"mutation #%d strategy %q is not yet implemented; supported in this build: set_literal_value, mutate_fixture, swap_function_call, swap_identifier, remove_kwarg, drop_flag",
-				idx+1, m.Strategy,
+				"mutation #%d strategy %q is not yet implemented; supported in this build: %s",
+				idx+1, m.Strategy, supportedStrategiesMessage(),
 			),
 		}}, false
 	}
 
-	isInputStrategy := m.Strategy == "set_literal_value" || m.Strategy == "mutate_fixture"
-	isSwapStrategy := m.Strategy == "swap_function_call" || m.Strategy == "swap_identifier"
-	isRemoveStrategy := m.Strategy == "remove_kwarg" || m.Strategy == "drop_flag"
-
-	branches := branchesFor(m)
 	var reasons []Reason
 
-	for _, branch := range branches {
+	for _, branch := range branchesFor(m) {
 		expected, inapplicable, hasExp := expectedOutcomeFor(m, branch)
 		if !hasExp {
-			// No expectation declared for this branch — schema would have
-			// flagged it; here we silently skip, which is the safe default.
+			// CLI-path defensive check: the schema's oneOf gate enforces
+			// "at least one of expected_result / expected_branch_outcome",
+			// but not the per-branch case where expected_branch_outcome is
+			// declared but the targeted branch is missing from the map.
+			// Surface that as a real authoring bug rather than a silent skip
+			// (which would let the entry verify green without ever running
+			// the mutation against the targeted branch).
+			reasons = append(reasons, Reason{
+				Code: "mutation_no_expectation",
+				Message: fmt.Sprintf(
+					"mutation #%d targets %s but declares no expected_result and no expected_branch_outcome.%s",
+					idx+1, branch, branch,
+				),
+			})
 			continue
 		}
 		if inapplicable {
 			continue
 		}
 
-		setup, action, inputs, baselineRes, ok := selectBranch(b, branch)
+		baseline, ok := b.byBranch(branch)
 		if !ok {
 			reasons = append(reasons, Reason{
 				Code: "mutation_unknown_branch",
@@ -110,49 +232,17 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			continue
 		}
 
-		var mutInputs map[string]any
-		var mutAction []runner.Step
-
-		switch {
-		case isInputStrategy:
-			subst, err := applyInputSubstitution(inputs, m.Target, m.NewValue)
-			if err != nil {
-				reasons = append(reasons, Reason{
-					Code: "mutation_target_invalid",
-					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-						idx+1, m.Strategy, branch, err),
-				})
-				continue
-			}
-			mutInputs = subst
-			mutAction = action
-		case isSwapStrategy:
-			rewritten, err := applySourceMutation(action, m)
-			if err != nil {
-				reasons = append(reasons, Reason{
-					Code: "mutation_target_invalid",
-					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-						idx+1, m.Strategy, branch, err),
-				})
-				continue
-			}
-			mutAction = rewritten
-			mutInputs = inputs
-		case isRemoveStrategy:
-			rewritten, err := applyRemoveMutation(action, m)
-			if err != nil {
-				reasons = append(reasons, Reason{
-					Code: "mutation_target_invalid",
-					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-						idx+1, m.Strategy, branch, err),
-				})
-				continue
-			}
-			mutAction = rewritten
-			mutInputs = inputs
+		mutInputs, mutAction, err := strat.apply(baseline, m)
+		if err != nil {
+			reasons = append(reasons, Reason{
+				Code: "mutation_target_invalid",
+				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
+					idx+1, m.Strategy, branch, err),
+			})
+			continue
 		}
 
-		got, err := runner.RunPython(setup, mutAction, mutInputs, b.timeout)
+		got, err := runner.RunPython(baseline.Setup, mutAction, mutInputs, b.Timeout)
 		if err != nil {
 			if errors.Is(err, runner.ErrTimeout) || errors.Is(err, runner.ErrInterpreterMissing) {
 				reasons = append(reasons, Reason{
@@ -173,7 +263,7 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			}
 		}
 
-		actual := classifyOutcome(branch, got, baselineRes, b.diff)
+		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
 		if actual != expected {
 			reasons = append(reasons, Reason{
 				Code: "mutation_outcome_mismatch",
@@ -189,49 +279,59 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 // explicit "both" expands to both branches; an explicit single branch is
 // returned as-is; an empty branch defaults to working_approach (matches the
 // implicit-discrimination rule in checkMutationDiscriminating).
-func branchesFor(m Mutation) []string {
+func branchesFor(m Mutation) []branchKind {
 	switch m.Branch {
 	case "both":
-		return []string{"failed_approach", "working_approach"}
-	case "failed_approach", "working_approach":
-		return []string{m.Branch}
-	default:
-		return []string{"working_approach"}
-	}
-}
-
-// selectBranch returns the per-branch baseline tuple for the given branch.
-// The bool return is false for unknown branch names.
-func selectBranch(b mutationBaseline, branch string) ([]runner.Step, []runner.Step, map[string]any, runner.ExecResult, bool) {
-	switch branch {
+		return []branchKind{branchFailed, branchWorking}
 	case "failed_approach":
-		return b.failedSetup, b.failedAction, b.failedInputs, b.failedRes, true
+		return []branchKind{branchFailed}
 	case "working_approach":
-		return b.workingSetup, b.workingAction, b.workingInputs, b.workingRes, true
+		return []branchKind{branchWorking}
+	default:
+		return []branchKind{branchWorking}
 	}
-	return nil, nil, nil, runner.ExecResult{}, false
 }
 
 // expectedOutcomeFor resolves the expected outcome for one branch. Returns
 // (expected, isInapplicable, hasExpectation). expected_branch_outcome takes
 // precedence over expected_result when both are set on a single mutation.
-func expectedOutcomeFor(m Mutation, branch string) (mutationOutcome, bool, bool) {
-	if v, ok := m.ExpectedBranchOutcome[branch]; ok {
-		return canonicalizeOutcome(v)
+func expectedOutcomeFor(m Mutation, k branchKind) (mutationOutcome, bool, bool) {
+	if v, ok := m.ExpectedBranchOutcome[k.String()]; ok {
+		return canonicalizeBranchOutcome(v)
 	}
 	if m.ExpectedResult != "" {
-		return canonicalizeOutcome(m.ExpectedResult)
+		return canonicalizeResult(m.ExpectedResult)
 	}
 	return "", false, false
 }
 
-// canonicalizeOutcome maps the schema's enum to the internal outcome enum.
-// "assertion_does_not_match" folds into outcomeFail (consistent with
-// checkMutationStructure); "inapplicable" returns isInapplicable=true so
-// the caller skips the mutation.
-func canonicalizeOutcome(s string) (mutationOutcome, bool, bool) {
+// canonicalizeBranchOutcome maps the schema's expected_branch_outcome.* enum
+// (the broader of the two — accepts assertion_does_not_match) to the internal
+// outcome enum. assertion_does_not_match folds into outcomeFail (consistent
+// with checkMutationStructure).
+func canonicalizeBranchOutcome(s string) (mutationOutcome, bool, bool) {
 	switch s {
 	case "fail", "assertion_does_not_match":
+		return outcomeFail, false, true
+	case "pass":
+		return outcomePass, false, true
+	case "unchanged":
+		return outcomeUnchanged, false, true
+	case "inapplicable":
+		return "", true, true
+	}
+	return "", false, false
+}
+
+// canonicalizeResult maps the schema's expected_result enum (narrower — does
+// NOT accept assertion_does_not_match) to the internal outcome enum. Used at
+// the m.ExpectedResult position only. The CLI path lacks an upstream JSON
+// Schema gate, so a hand-crafted entry with expected_result:
+// assertion_does_not_match would be silently accepted by the broader
+// canonicalizer; this one rejects it.
+func canonicalizeResult(s string) (mutationOutcome, bool, bool) {
+	switch s {
+	case "fail":
 		return outcomeFail, false, true
 	case "pass":
 		return outcomePass, false, true
@@ -250,17 +350,17 @@ func canonicalizeOutcome(s string) (mutationOutcome, bool, bool) {
 //     should return, returned when should raise, wrong type/value/exception).
 //   - outcomePass otherwise (re-run still satisfies the spec but produced a
 //     different concrete value than the baseline).
-func classifyOutcome(branch string, got, baseline runner.ExecResult, diff map[string]any) mutationOutcome {
+func classifyOutcome(k branchKind, got, baseline runner.ExecResult, diff map[string]any) mutationOutcome {
 	if execResultsEqual(got, baseline) {
 		return outcomeUnchanged
 	}
 	var retKey, raiseKey string
-	if branch == "failed_approach" {
+	if k == branchFailed {
 		retKey, raiseKey = "failed_branch_must_return", "failed_branch_must_raise"
 	} else {
 		retKey, raiseKey = "working_branch_must_return", "working_branch_must_raise"
 	}
-	if reasons := matchOutcome(branch, got, diff, retKey, raiseKey); len(reasons) > 0 {
+	if reasons := matchOutcome(k.String(), got, diff, retKey, raiseKey); len(reasons) > 0 {
 		return outcomeFail
 	}
 	return outcomePass
@@ -404,9 +504,9 @@ func applyRemoveMutation(steps []runner.Step, m Mutation) ([]runner.Step, error)
 }
 
 // resolveSwapToken implements the swap-mutation token resolution rule:
-//   1. If m.Token is non-empty, use it.
-//   2. Else if m.Target does not start with a branch-path prefix, use it.
-//   3. Else error — the mutation has no usable find-pattern.
+//  1. If m.Token is non-empty, use it.
+//  2. Else if m.Target does not start with a branch-path prefix, use it.
+//  3. Else error — the mutation has no usable find-pattern.
 func resolveSwapToken(m Mutation) (string, error) {
 	if m.Token != "" {
 		return m.Token, nil

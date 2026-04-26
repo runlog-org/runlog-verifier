@@ -89,6 +89,7 @@ verification:
   - strategy: mutate_fixture
     target: failed_approach.$INPUT
     new_value: 'permissions: 22'
+    branch: failed_approach
     expected_branch_outcome:
       failed_approach: assertion_does_not_match
   # On PyYAML >= 5.1 yaml.load requires a Loader argument, so swapping
