@@ -74,6 +74,31 @@ func runUnit(e *Entry) Result {
 		res.Reasons = reasons
 		return res
 	}
+
+	baseline := mutationBaseline{
+		failedSetup:   failedSetup,
+		failedAction:  failedAction,
+		workingSetup:  workingSetup,
+		workingAction: workingAction,
+		failedInputs:  failedInputs,
+		workingInputs: workingInputs,
+		failedRes:     failedRes,
+		workingRes:    workingRes,
+		diff:          e.Verification.Differential,
+		timeout:       timeout,
+	}
+	mutReasons, supported := runMutations(e, baseline)
+	if !supported {
+		res.Status = "tier_unsupported"
+		res.Reasons = mutReasons
+		return res
+	}
+	if len(mutReasons) > 0 {
+		res.Status = "rejected"
+		res.Reasons = mutReasons
+		return res
+	}
+
 	res.Status = "verified"
 	return res
 }
