@@ -308,6 +308,12 @@ func normalizeInputTarget(target string) string {
 // inputs. Both bare ($KEY) and stripped-prefix (KEY) are checked; whichever
 // exists in inputs is overwritten. If neither exists, the bare $-prefixed
 // key is added so the runner's TrimPrefix logic can still bind it.
+//
+// F17: newValue may be the {python_expr: "<expr>"} opt-in shape introduced
+// by F12. yaml.v3 decodes nested maps into map[string]any, which is exactly
+// the type the runner's pythonExprFromValue checks — so no conversion is
+// needed here. The value is stored as-is and the runner evaluates the
+// expression in Python instead of JSON-decoding it as a literal string.
 func applyInputSubstitution(inputs map[string]any, target string, newValue any) (map[string]any, error) {
 	if target == "" {
 		return nil, errors.New("mutation target is empty")
