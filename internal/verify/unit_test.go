@@ -418,3 +418,162 @@ func TestRunUnitReturnLengthAndContainsCombined(t *testing.T) {
 		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
 	}
 }
+
+func TestRunUnitLiteralBound(t *testing.T) {
+	skipIfNoPython3(t)
+	yaml := `
+unit_id: unit-literal-bound
+domain: [test]
+version_constraints: { spec: { name: test } }
+literals:
+  $LITERAL_1:
+    value: 5
+    reason: test
+failed_approach:
+  description: subtracts one
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = $LITERAL_1 - 1" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns the literal
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = $LITERAL_1" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: int, value_equals: 4 }
+    working_branch_must_return: { type: int, value_equals: 5 }
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
+	}
+}
+
+func TestRunUnitLiteralStringValueBound(t *testing.T) {
+	skipIfNoPython3(t)
+	yaml := `
+unit_id: unit-literal-string-bound
+domain: [test]
+version_constraints: { spec: { name: test } }
+literals:
+  $LITERAL_1:
+    value: "fixtures/probe-object"
+    reason: test
+failed_approach:
+  description: returns a different string
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 'other'" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns the literal string
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = $LITERAL_1" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: str, value_equals: "other" }
+    working_branch_must_return: { type: str, value_equals: "fixtures/probe-object" }
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
+	}
+}
+
+func TestRunUnitInputOverridesLiteral(t *testing.T) {
+	skipIfNoPython3(t)
+	yaml := `
+unit_id: unit-input-overrides-literal
+domain: [test]
+version_constraints: { spec: { name: test } }
+literals:
+  $LITERAL_1:
+    value: 5
+    reason: test
+failed_approach:
+  description: returns a different value
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 0" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns the bound literal name
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = $LITERAL_1" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    inputs:
+      $LITERAL_1: 99
+    failed_branch_must_return: { type: int, value_equals: 0 }
+    working_branch_must_return: { type: int, value_equals: 99 }
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
+	}
+}
+
+func TestRunUnitMalformedLiteralSkipped(t *testing.T) {
+	skipIfNoPython3(t)
+	yaml := `
+unit_id: unit-malformed-literal-skipped
+domain: [test]
+version_constraints: { spec: { name: test } }
+literals:
+  $LITERAL_1:
+    value: 5
+    reason: test
+  $LITERAL_2: "not a map"
+failed_approach:
+  description: returns a different value
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 0" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns the well-formed literal
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = $LITERAL_1" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: int, value_equals: 0 }
+    working_branch_must_return: { type: int, value_equals: 5 }
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
+	}
+}

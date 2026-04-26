@@ -53,6 +53,9 @@ func runUnit(e *Entry) Result {
 		return rejected(res, "malformed_inputs", err.Error())
 	}
 
+	failedInputs = mergeLiterals(e.Literals, failedInputs)
+	workingInputs = mergeLiterals(e.Literals, workingInputs)
+
 	timeout := e.Verification.TimeoutSeconds
 
 	failedRes, err := runner.RunPython(failedSetup, failedAction, failedInputs, timeout)
@@ -185,6 +188,39 @@ func stepFromMap(m map[string]any) runner.Step {
 		s.Body = v
 	}
 	return s
+}
+
+// mergeLiterals folds the entry's top-level literals block into a per-branch
+// inputs map. Each literal is shaped {$LITERAL_N: {value: V, reason: ..., category: ...}};
+// only the `value` field is bound at runtime. Per-branch inputs win on key
+// collision — a differential.inputs.{branch}.$LITERAL_N override stays in effect.
+//
+// Literals without a `value` field are skipped silently (the schema validates
+// the shape upstream; we don't redundantly enforce it here).
+//
+// Returns a new map; the input is not mutated. nil literals → returns inputs
+// unchanged (possibly nil).
+func mergeLiterals(literals map[string]any, inputs map[string]any) map[string]any {
+	if len(literals) == 0 {
+		return inputs
+	}
+	out := make(map[string]any, len(literals)+len(inputs))
+	for name, lit := range literals {
+		m, ok := lit.(map[string]any)
+		if !ok {
+			continue
+		}
+		v, ok := m["value"]
+		if !ok {
+			continue
+		}
+		out[name] = v
+	}
+	// Per-branch inputs override literals on key collision.
+	for k, v := range inputs {
+		out[k] = v
+	}
+	return out
 }
 
 // splitInputs extracts the per-branch inputs from differential.inputs.
