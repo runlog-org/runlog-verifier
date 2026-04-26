@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"strings"
@@ -245,6 +246,137 @@ func TestRunPythonReturnsListOfMixedTypes(t *testing.T) {
 		if res.ElementTypes[i] != v {
 			t.Fatalf("element_types[%d]=%q, want %q", i, res.ElementTypes[i], v)
 		}
+	}
+}
+
+func TestRunPythonInputPythonExprList(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(
+		nil,
+		[]Step{{Type: "code", Lang: "python", Body: "$RESULT = $ITEMS"}},
+		map[string]any{"$ITEMS": map[string]any{"python_expr": "list(range(5))"}},
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.TypeName != "list" {
+		t.Fatalf("type=%q, want list", res.TypeName)
+	}
+	var got []int
+	if err := json.Unmarshal(res.JSONValue, &got); err != nil {
+		t.Fatalf("unmarshal json_value=%q: %v", string(res.JSONValue), err)
+	}
+	want := []int{0, 1, 2, 3, 4}
+	if len(got) != len(want) {
+		t.Fatalf("got=%v, want=%v", got, want)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Fatalf("got[%d]=%d, want %d", i, got[i], v)
+		}
+	}
+	if res.Length == nil || *res.Length != 5 {
+		t.Fatalf("length=%v, want *5", res.Length)
+	}
+}
+
+func TestRunPythonInputPythonExprArith(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(
+		nil,
+		[]Step{{Type: "code", Lang: "python", Body: "$RESULT = $X"}},
+		map[string]any{"$X": map[string]any{"python_expr": "10 * 2 + 5"}},
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.TypeName != "int" {
+		t.Fatalf("type=%q, want int", res.TypeName)
+	}
+	if !bytes.Equal(res.JSONValue, []byte("25")) {
+		t.Fatalf("json_value=%q, want 25", string(res.JSONValue))
+	}
+}
+
+func TestRunPythonInputJSONFallback(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(
+		nil,
+		[]Step{{Type: "code", Lang: "python", Body: "$RESULT = $X"}},
+		map[string]any{"$X": 42},
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if !bytes.Equal(res.JSONValue, []byte("42")) {
+		t.Fatalf("json_value=%q, want 42", string(res.JSONValue))
+	}
+}
+
+func TestRunPythonInputDictNotEvaluated(t *testing.T) {
+	skipIfNoPython(t)
+	// A regular dict (NOT python_expr shape) — the opt-in must be opt-in.
+	res, err := RunPython(
+		nil,
+		[]Step{{Type: "code", Lang: "python", Body: "$RESULT = $X"}},
+		map[string]any{"$X": map[string]any{"a": 1, "b": 2}},
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.TypeName != "dict" {
+		t.Fatalf("type=%q, want dict", res.TypeName)
+	}
+	var got map[string]int
+	if err := json.Unmarshal(res.JSONValue, &got); err != nil {
+		t.Fatalf("unmarshal json_value=%q: %v", string(res.JSONValue), err)
+	}
+	want := map[string]int{"a": 1, "b": 2}
+	if len(got) != len(want) {
+		t.Fatalf("got=%v, want=%v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("got[%q]=%d, want %d", k, got[k], v)
+		}
+	}
+}
+
+func TestRunPythonInputPythonExprMultiKeyFallsThrough(t *testing.T) {
+	skipIfNoPython(t)
+	// A multi-key map containing python_expr alongside extras must NOT trigger
+	// Python eval — len(m) != 1 short-circuits, so it goes through JSON binding
+	// and the action sees a literal dict with both keys.
+	res, err := RunPython(
+		nil,
+		[]Step{{Type: "code", Lang: "python", Body: "$RESULT = $INVOKED"}},
+		map[string]any{"$INVOKED": map[string]any{"python_expr": "list(range(5))", "extra": "noise"}},
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.TypeName != "dict" {
+		t.Fatalf("type=%q, want dict (multi-key map should not eval)", res.TypeName)
 	}
 }
 
