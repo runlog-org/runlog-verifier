@@ -48,40 +48,44 @@ func Run(data []byte) (Result, error) {
 
 	res := Result{UnitID: e.UnitID, Tier: tier}
 
-	// Tiers other than assertion_only are accepted as well-formed but not
-	// yet executed by this MVP. We return tier_unsupported so the caller
-	// can route them to a future runner without conflating them with
-	// rejection.
-	if tier != "assertion_only" {
+	switch tier {
+	case "assertion_only":
+		// Run all checks and aggregate reasons. We run every check even
+		// after the first failure so the submitter sees the full list in
+		// one pass.
+		var reasons []Reason
+		reasons = append(reasons, checkBranchesPresent(&e)...)
+		reasons = append(reasons, checkBranchesDiscriminating(&e)...)
+		reasons = append(reasons, checkAssertionOnlyShape(&e)...)
+		reasons = append(reasons, checkMutationStructure(&e)...)
+		reasons = append(reasons, checkMutationDiscriminating(&e)...)
+		reasons = append(reasons, checkPrimitivesRegistered(&e)...)
+
+		if len(reasons) == 0 {
+			res.Status = "verified"
+			return res, nil
+		}
+		res.Status = "rejected"
+		res.Reasons = reasons
+		return res, nil
+
+	case "unit":
+		return runUnit(&e), nil
+
+	default:
+		// integration or any unknown tier — accepted as well-formed YAML
+		// but not yet executed by this build.
 		res.Status = "tier_unsupported"
 		res.Reasons = []Reason{{
 			Code: "tier_not_yet_implemented",
 			Message: fmt.Sprintf(
 				"verification tier %q is not implemented in this verifier "+
-					"build — Phase 2 ships assertion_only first; differential "+
-					"and integration land in follow-up commits",
+					"build — Phase 2 ships assertion_only and unit (isolation: "+
+					"function) first; integration lands with cassette replay "+
+					"in a follow-up commit",
 				tier,
 			),
 		}}
 		return res, nil
 	}
-
-	// assertion_only: run all checks and aggregate reasons. We run every
-	// check even after the first failure so the submitter sees the full
-	// list in one pass.
-	var reasons []Reason
-	reasons = append(reasons, checkBranchesPresent(&e)...)
-	reasons = append(reasons, checkBranchesDiscriminating(&e)...)
-	reasons = append(reasons, checkAssertionOnlyShape(&e)...)
-	reasons = append(reasons, checkMutationStructure(&e)...)
-	reasons = append(reasons, checkMutationDiscriminating(&e)...)
-	reasons = append(reasons, checkPrimitivesRegistered(&e)...)
-
-	if len(reasons) == 0 {
-		res.Status = "verified"
-		return res, nil
-	}
-	res.Status = "rejected"
-	res.Reasons = reasons
-	return res, nil
 }

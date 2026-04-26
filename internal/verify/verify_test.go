@@ -118,11 +118,11 @@ func TestRunUnregisteredPrimitive(t *testing.T) {
 	}
 }
 
-func TestRunDifferentialTierUnsupported(t *testing.T) {
+func TestRunIntegrationTierUnsupported(t *testing.T) {
 	yaml := strings.Replace(
 		k8sAssertionOnly,
 		"type: assertion_only",
-		"type: unit",
+		"type: integration",
 		1,
 	)
 	res, err := Run([]byte(yaml))
