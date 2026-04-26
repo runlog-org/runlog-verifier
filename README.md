@@ -39,8 +39,10 @@ First-time setup on a fresh machine:
     make test          # roundtrip + fingerprint coverage
 
 Reproducible-build flags (`-trimpath -buildvcs=false`) are wired into
-the Makefile. CI publishing reproducible binaries is deferred to the
-first Phase 2 release.
+the Makefile and validated on every push by
+[`.github/workflows/verifier.yml`](../.github/workflows/verifier.yml) —
+two consecutive builds must hash identically or CI fails. Signed-release
+publishing of tagged binaries is deferred to the first Phase 2 release.
 
 ## CLI status
 

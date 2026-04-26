@@ -1,0 +1,61 @@
+name: verifier
+
+on:
+  push:
+    paths:
+      - "verifier/**"
+      - ".github/workflows/verifier.yml"
+  pull_request:
+    paths:
+      - "verifier/**"
+      - ".github/workflows/verifier.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: verifier
+    steps:
+      - uses: actions/checkout@v4
+
+      # cache: false until verifier/go.sum is committed (CI follow-up).
+      # Build is fast (stdlib + yaml.v3) so the cache miss is cheap.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+
+      - name: Tidy (writes go.sum on first run)
+        run: go mod tidy
+
+      - name: Vet
+        run: make vet
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: make build
+
+      # Validates -trimpath -buildvcs=false produce byte-identical output.
+      # The Makefile reads VERSION (defaults "dev") and COMMIT (git rev-parse)
+      # deterministically, so two consecutive builds in the same workspace
+      # must hash identically or the trust model in
+      # docs/03-verification-and-provenance.md §5.4 is broken.
+      - name: Reproducibility check
+        run: |
+          sha1=$(sha256sum bin/runlog-verifier | awk '{print $1}')
+          make clean
+          make build
+          sha2=$(sha256sum bin/runlog-verifier | awk '{print $1}')
+          if [ "$sha1" != "$sha2" ]; then
+            echo "::error::Reproducibility check FAILED — binaries differ:"
+            echo "  build 1: $sha1"
+            echo "  build 2: $sha2"
+            exit 1
+          fi
+          echo "Reproducible: $sha1"
