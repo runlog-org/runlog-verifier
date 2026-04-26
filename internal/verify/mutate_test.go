@@ -767,3 +767,155 @@ func TestMutationStrategyUnsupportedRemainsCustom(t *testing.T) {
 		t.Fatalf("expected mutation_strategy_unsupported, got %v", res.Reasons)
 	}
 }
+
+// F17: python_expr-aware mutation new_value — the following tests verify that
+// mutate_fixture and set_literal_value new_value accepts the {python_expr: "<expr>"}
+// opt-in shape introduced by F12 on the input side. The value is evaluated in
+// Python instead of being JSON-decoded as a literal string.
+
+func TestMutationFixturePythonExprNewValue(t *testing.T) {
+	skipIfNoPython3(t)
+	// Working action returns the input list. Spec accepts any list (no value_equals).
+	// Baseline: $ITEMS=[1] (literal) → working returns [1]. Mutation rewrites
+	// $ITEMS to {python_expr: "list(range(3))"} → working returns [0,1,2].
+	// Spec is type: list (no value_equals) → outcomePass is the only correct
+	// result. If python_expr is misrouted as a literal string,
+	// json.loads("list(range(3))") raises and the runner returns Raised=true,
+	// which classifyOutcome treats as outcomeFail — mismatch surfaces.
+	yml := `
+unit_id: unit-mutation-python-expr-newvalue
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns []
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = []" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns the input list
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = $ITEMS" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    inputs:
+      $ITEMS: [1]
+    failed_branch_must_return: { type: list, value_equals: [] }
+    working_branch_must_return: { type: list }
+  mutations:
+    - strategy: mutate_fixture
+      target: $ITEMS
+      new_value:
+        python_expr: "list(range(3))"
+      branch: working_approach
+      expected_result: pass
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationFixturePythonExprNewValueWithLength(t *testing.T) {
+	skipIfNoPython3(t)
+	// Baseline $ITEMS=[1] → working returns length=1. Mutation rewrites $ITEMS
+	// to list(range(3)) → length=3. Spec uses length: 1 (matches baseline only)
+	// → mutation produces length=3 which violates spec → outcomeFail. Mutation
+	// declares expected_result: fail → verified. Tests integration with F11 length matcher.
+	yml := `
+unit_id: unit-mutation-python-expr-with-length
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns []
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = []" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns the input list
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = $ITEMS" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    inputs:
+      $ITEMS: [1]
+    failed_branch_must_return: { type: list, length: 0 }
+    working_branch_must_return: { type: list, length: 1 }
+  mutations:
+    - strategy: mutate_fixture
+      target: $ITEMS
+      new_value:
+        python_expr: "list(range(3))"
+      branch: working_approach
+      expected_result: fail
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationSetLiteralPythonExprNewValue(t *testing.T) {
+	skipIfNoPython3(t)
+	// set_literal_value shares the input-substitution path with mutate_fixture
+	// (both go through applyInputSubstitution). Baseline $LITERAL_1=[1,2,3]
+	// → working returns sum=6. Mutation rewrites $LITERAL_1 to list(range(10))
+	// → sum=45 ≠ 6 → outcomeFail. Mutation declares expected_result: fail → verified.
+	yml := `
+unit_id: unit-mutation-set-literal-python-expr
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns 0
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 0" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns sum of $LITERAL_1
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = sum($LITERAL_1)" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    inputs:
+      $LITERAL_1: [1, 2, 3]
+    failed_branch_must_return: { type: int, value_equals: 0 }
+    working_branch_must_return: { type: int, value_equals: 6 }
+  mutations:
+    - strategy: set_literal_value
+      target: $LITERAL_1
+      new_value:
+        python_expr: "list(range(10))"
+      branch: working_approach
+      expected_result: fail
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
