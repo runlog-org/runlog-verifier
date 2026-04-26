@@ -158,9 +158,9 @@ func RunPython(setup, action []Step, inputs map[string]any, timeoutSec float64) 
 //
 // Placeholder contract:
 //
-//	# {{IMPORTS}}   — extra top-level imports; "import asyncio\n" for async, "\n" for sync
-//	# {{INPUTS}}    — per-input binding lines (sorted); empty string when no inputs
-//	# {{SETUP}}     — setup step bodies; empty string when no setup
+//	# {{IMPORTS}}      — extra top-level imports; "import asyncio\n" for async, "\n" for sync
+//	# {{INPUTS}}\n     — per-input binding lines (sorted); empty string when no inputs (line consumed)
+//	# {{SETUP}}\n      — setup step bodies; empty string when no setup (line consumed)
 //	# {{ACTION_OPEN}}  — async: "async def _v_main():\n    global _v_RESULT\n"; sync: "try:\n"
 //	# {{ACTION_BODY}}  — indented action step lines (always 4-space indented)
 //	# {{ACTION_CLOSE}} — async: "\ntry:\n    asyncio.run(_v_main())\nexcept...\n    sys.exit(0)\n\n"
@@ -267,8 +267,8 @@ func buildPythonScript(setup, action []Step, inputs map[string]any) (string, err
 	// Fill placeholders (each is unique — order is irrelevant).
 	script := driverTemplate
 	script = strings.Replace(script, "# {{IMPORTS}}\n", imports, 1)
-	script = strings.Replace(script, "# {{INPUTS}}", inputsSec, 1)
-	script = strings.Replace(script, "# {{SETUP}}", setupSec, 1)
+	script = strings.Replace(script, "# {{INPUTS}}\n", inputsSec, 1)
+	script = strings.Replace(script, "# {{SETUP}}\n", setupSec, 1)
 	script = strings.Replace(script, "# {{ACTION_OPEN}}", actionOpen, 1)
 	script = strings.Replace(script, "# {{ACTION_BODY}}", actionBody, 1)
 	script = strings.Replace(script, "# {{ACTION_CLOSE}}", actionClose, 1)
