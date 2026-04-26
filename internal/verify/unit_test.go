@@ -577,3 +577,146 @@ verification:
 		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
 	}
 }
+
+func TestRunUnitPathSimpleKey(t *testing.T) {
+	skipIfNoPython3(t)
+	yaml := `
+unit_id: unit-path-simple-key
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns dict with int permissions
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = {'permissions': 18}" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns dict with str permissions
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = {'permissions': '022'}" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: int, value_equals: 18, path: permissions }
+    working_branch_must_return: { type: str, value_equals: '022', path: permissions }
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
+	}
+}
+
+func TestRunUnitPathNestedKeys(t *testing.T) {
+	skipIfNoPython3(t)
+	yaml := `
+unit_id: unit-path-nested-keys
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns nested dict with int 0
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = {'a': {'b': 0}}" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns nested dict with int 42
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = {'a': {'b': 42}}" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: int, value_equals: 0, path: a.b }
+    working_branch_must_return: { type: int, value_equals: 42, path: a.b }
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
+	}
+}
+
+func TestRunUnitPathMissingKey(t *testing.T) {
+	skipIfNoPython3(t)
+	yaml := `
+unit_id: unit-path-missing-key
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns dict missing the requested key
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = {'permissions': 18}" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns 22 (irrelevant for this test)
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 22" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: int, value_equals: 18, path: missing_key }
+    working_branch_must_return: { type: int, value_equals: 22 }
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "unexpected_exception") {
+		t.Fatalf("expected unexpected_exception, got %v", res.Reasons)
+	}
+}
+
+func TestRunUnitPathWithLengthAndContains(t *testing.T) {
+	skipIfNoPython3(t)
+	yaml := `
+unit_id: unit-path-length-contains
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns dict with shorter items list
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = {'items': [1, 2]}" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns dict with mixed items including ValueError
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = {'items': [ValueError('a'), 1, 2]}" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { length: 2, path: items }
+    working_branch_must_return: { length: 3, contains_exception_type: ValueError, path: items }
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
+	}
+}
