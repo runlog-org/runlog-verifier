@@ -1,0 +1,103 @@
+unit_id: pyyaml-shape-poc
+domain:
+- python
+- yaml
+- pyyaml
+- configuration
+version_constraints:
+  runtime:
+    name: python
+    version: '>=3.8'
+  packages:
+  - name: pyyaml
+    version: '>=5.0,<7.0'
+failed_approach:
+  description: 'Writing a file-permission octal like `022` unquoted in a YAML config and parsing it with
+    PyYAML''s safe_load. PyYAML defaults to YAML 1.1 semantics, which parse bare integers with leading
+    zeros as octal. The literal `022` becomes decimal 18 — not the intended 22. Silent coercion, no error.
+    Bites Kubernetes ConfigMaps, Ansible playbooks, GitHub Actions workflows, and any hand-edited YAML
+    config.
+
+    '
+  setup:
+  - type: code
+    lang: python
+    body: 'import yaml
+
+      '
+  action:
+  - type: code
+    lang: python
+    body: '$RESULT = yaml.safe_load($INPUT)
+
+      '
+  assertion:
+    type: value_equals
+    expect: fail
+    path: permissions
+    value: $LITERAL_1
+working_approach:
+  description: 'Quote the value to force string interpretation. The config-consuming code then parses
+    the string to int explicitly, making the intended base unambiguous. Alternatively, use ruamel.yaml
+    with YAML 1.2 semantics where leading zeros are not treated as octal indicators.
+
+    '
+  setup:
+  - type: code
+    lang: python
+    body: 'import yaml
+
+      '
+  action:
+  - type: code
+    lang: python
+    body: '$RESULT = yaml.safe_load($INPUT)
+
+      '
+  assertion:
+    type: value_equals
+    expect: success
+    path: permissions
+    value: $LITERAL_2
+literals:
+  $LITERAL_1:
+    value: 18
+    reason: octal 022 parsed as YAML 1.1 integer — public spec behavior
+    category: public_constant
+  $LITERAL_2:
+    value: '022'
+    reason: the quoted string form the author actually wants — public constant
+    category: public_constant
+verification:
+  type: unit
+  isolation: function
+  differential:
+    inputs:
+      failed_approach:
+        $INPUT: 'permissions: 022'
+      working_approach:
+        $INPUT: 'permissions: "022"'
+    failed_branch_must_return:
+      type: int
+      value_equals: 18
+      path: permissions
+    working_branch_must_return:
+      type: str
+      value_equals: '022'
+      path: permissions
+  mutations:
+  - strategy: mutate_fixture
+    target: failed_approach.$INPUT
+    new_value: 'permissions: 22'
+    expected_branch_outcome:
+      failed_approach: assertion_does_not_match
+  # On PyYAML >= 5.1 yaml.load requires a Loader argument, so swapping
+  # safe_load → load actually breaks both branches (TypeError → outcomeFail
+  # against the must_return spec). The canonical seed declares
+  # expected_result: unchanged, which holds on older PyYAML; the verifier
+  # testdata pins the modern observed behaviour.
+  - strategy: swap_function_call
+    target: yaml.safe_load
+    new_value: yaml.load
+    expected_result: fail
+  timeout_seconds: 5
