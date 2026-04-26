@@ -98,7 +98,9 @@ func TestRunUnitWrongReturnType(t *testing.T) {
 func TestRunUnitMissingIsolation(t *testing.T) {
 	// Empty isolation hits the "isolation_not_yet_implemented" tier-unsupported
 	// path without needing to spawn python — runs even on python-less hosts.
-	yaml := strings.Replace(unitGreenYAML, "isolation: function\n", "", 1)
+	// Strip the leading two-space indent so the surrounding mapping stays
+	// at a uniform indentation level (yaml.v3 rejects mid-block dedents).
+	yaml := strings.Replace(unitGreenYAML, "  isolation: function\n", "", 1)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)

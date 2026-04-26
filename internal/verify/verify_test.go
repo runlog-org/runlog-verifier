@@ -138,7 +138,10 @@ func TestRunIntegrationTierUnsupported(t *testing.T) {
 }
 
 func TestRunMissingVerificationType(t *testing.T) {
-	yaml := strings.Replace(k8sAssertionOnly, "type: assertion_only\n", "", 1)
+	// Strip the leading two-space indent along with the line so the
+	// surrounding mapping stays at a uniform indentation level — yaml.v3
+	// rejects a child line that's deeper-indented than its siblings.
+	yaml := strings.Replace(k8sAssertionOnly, "  type: assertion_only\n", "", 1)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
