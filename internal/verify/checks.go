@@ -192,15 +192,27 @@ func checkAssertionOnlyShape(e *Entry) []Reason {
 
 // isBreakLikeOutcome reports whether the raw outcome string signals that a
 // mutation is expected to break the branch — covers both "fail" and the
-// assertion-only alias "assertion_does_not_match".
+// assertion-only alias "assertion_does_not_match". Use this for
+// ExpectedBranchOutcome values; for ExpectedResult, use isBreakLikeResult
+// instead — the schema rejects assertion_does_not_match in expected_result.
 func isBreakLikeOutcome(s string) bool {
 	return s == "fail" || s == "assertion_does_not_match"
 }
 
+// isBreakLikeResult reports whether the raw outcome string signals a break
+// for the expected_result field, which uses the narrower 4-value enum that
+// does NOT include "assertion_does_not_match". Only "fail" counts here.
+func isBreakLikeResult(s string) bool {
+	return s == "fail"
+}
+
 // mutationExpectsBreak reports whether mutation m expects a break-like
 // outcome on any branch (either via expected_result or expected_branch_outcome).
+// Uses the enum-appropriate helper for each field: isBreakLikeResult for
+// expected_result (4-value enum) and isBreakLikeOutcome for
+// expected_branch_outcome values (5-value enum, includes assertion_does_not_match).
 func mutationExpectsBreak(m Mutation) bool {
-	if isBreakLikeOutcome(m.ExpectedResult) {
+	if isBreakLikeResult(m.ExpectedResult) {
 		return true
 	}
 	for _, v := range m.ExpectedBranchOutcome {
