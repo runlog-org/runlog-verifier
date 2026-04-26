@@ -194,10 +194,10 @@ verification:
 
 func TestMutationStrategyUnsupported(t *testing.T) {
 	skipIfNoPython3(t)
-	// remove_kwarg is not implemented; entry must degrade to
+	// custom is not implemented in this build; entry must degrade to
 	// tier_unsupported with a message naming the strategy.
 	mutations := `
-    - strategy: remove_kwarg
+    - strategy: custom
       target: working_approach.action
       token: foo
       new_value: bar
@@ -222,8 +222,8 @@ func TestMutationStrategyUnsupported(t *testing.T) {
 			break
 		}
 	}
-	if !strings.Contains(msg, "remove_kwarg") {
-		t.Errorf("message %q does not name remove_kwarg", msg)
+	if !strings.Contains(msg, "custom") {
+		t.Errorf("message %q does not name custom", msg)
 	}
 }
 
@@ -547,5 +547,223 @@ func TestMutationDifferentialFailureBlocks(t *testing.T) {
 	}
 	if hasReason(res.Reasons, "mutation_outcome_mismatch") {
 		t.Fatalf("mutation reasons leaked despite differential failure: %v", res.Reasons)
+	}
+}
+
+// removeBaseYAML is a unit-tier entry whose working branch action calls
+// sorted([3, 1, 2], reverse=False) returning [1, 2, 3]. Failed branch
+// returns []. Tests below interpolate the working-branch return spec and
+// the mutations YAML block to exercise the remove strategies.
+const removeBaseYAML = `
+unit_id: unit-mutation-remove-test
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns empty list
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = []" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: sorts with reverse=False
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = sorted([3, 1, 2], reverse=False)" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: list, value_equals: [] }
+    working_branch_must_return: __WORKING_SPEC__
+  mutations: __MUTATIONS__
+  timeout_seconds: 5
+`
+
+// buildRemoveYAML interpolates the working-branch return spec and the
+// mutations YAML block into removeBaseYAML.
+func buildRemoveYAML(workingSpec, mutations string) string {
+	y := strings.Replace(removeBaseYAML, "__WORKING_SPEC__", workingSpec, 1)
+	return strings.Replace(y, "__MUTATIONS__", mutations, 1)
+}
+
+func TestMutationRemoveKwargCleanRemoval(t *testing.T) {
+	skipIfNoPython3(t)
+	// Removing ", reverse=False" (with leading comma + space) leaves
+	// sorted([3, 1, 2]) which still returns [1, 2, 3]. Outcome: unchanged.
+	mutations := `
+    - strategy: remove_kwarg
+      target: working_approach.action
+      token: ", reverse=False"
+      branch: working_approach
+      expected_result: unchanged
+`
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationRemoveKwargBreakingTextLeavesSyntaxError(t *testing.T) {
+	skipIfNoPython3(t)
+	// Removing just "reverse" (without the comma or value) leaves
+	// sorted([3, 1, 2], =False) which is a Python SyntaxError. The
+	// crash-as-fail classifier synthesizes a raised ExecResult so the
+	// outcome classifier produces outcomeFail → matches expected fail.
+	// Load-bearing test for the crash-as-fail change.
+	mutations := `
+    - strategy: remove_kwarg
+      target: working_approach.action
+      token: "reverse"
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationDropFlag(t *testing.T) {
+	skipIfNoPython3(t)
+	// drop_flag routes through the same applyRemoveMutation helper.
+	// Same shape as the remove_kwarg clean-removal test.
+	mutations := `
+    - strategy: drop_flag
+      target: working_approach.action
+      token: ", reverse=False"
+      branch: working_approach
+      expected_result: unchanged
+`
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationRemoveKwargInvalidShape(t *testing.T) {
+	skipIfNoPython3(t)
+	// No token field, target is a branch path → resolveSwapToken errors.
+	mutations := `
+    - strategy: remove_kwarg
+      target: working_approach.action
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_target_invalid") {
+		t.Fatalf("expected mutation_target_invalid, got %v", res.Reasons)
+	}
+	var msg string
+	for _, r := range res.Reasons {
+		if r.Code == "mutation_target_invalid" {
+			msg = r.Message
+			break
+		}
+	}
+	if !strings.Contains(msg, "needs a token field or a non-path target") {
+		t.Errorf("message %q missing the resolution-rule hint", msg)
+	}
+}
+
+func TestMutationCrashAsFailNotTimeout(t *testing.T) {
+	skipIfNoPython3(t)
+	// A mutation that triggers a sleep exceeding timeout_seconds: 1
+	// must surface as mutation_runner_error (real ErrTimeout), NOT as
+	// outcomeFail. Confirms the timeout discrimination works.
+	//
+	// Baseline action sleeps for $SLEEP_SEC (0) → completes fast.
+	// Mutation sets $SLEEP_SEC = 5 → sleeps past the 1s timeout.
+	yaml := `
+unit_id: unit-mutation-timeout
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns 0
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 0" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: sleeps for $SLEEP_SEC then returns 1
+  setup: []
+  action:
+    - { type: code, lang: python, body: "import time\ntime.sleep($SLEEP_SEC)\n$RESULT = 1" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    inputs:
+      $SLEEP_SEC: 0
+    failed_branch_must_return: { type: int, value_equals: 0 }
+    working_branch_must_return: { type: int, value_equals: 1 }
+  mutations:
+    - strategy: mutate_fixture
+      target: $SLEEP_SEC
+      new_value: 5
+      branch: working_approach
+      expected_result: fail
+  timeout_seconds: 1
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_runner_error") {
+		t.Fatalf("expected mutation_runner_error, got %v", res.Reasons)
+	}
+	// And specifically NOT mutation_outcome_mismatch — that would mean
+	// the timeout was wrongly synthesized into outcomeFail.
+	if hasReason(res.Reasons, "mutation_outcome_mismatch") {
+		t.Fatalf("timeout was wrongly classified as outcome mismatch: %v", res.Reasons)
+	}
+}
+
+func TestMutationStrategyUnsupportedRemainsCustom(t *testing.T) {
+	skipIfNoPython3(t)
+	// custom must remain in the unsupported set after F15. This locks
+	// the contract that adding remove_kwarg / drop_flag did not also
+	// silently graduate "custom".
+	mutations := `
+    - strategy: custom
+      target: working_approach.action
+      token: foo
+      new_value: bar
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "tier_unsupported" {
+		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_strategy_unsupported") {
+		t.Fatalf("expected mutation_strategy_unsupported, got %v", res.Reasons)
 	}
 }
