@@ -144,6 +144,10 @@ func buildPythonScript(setup, action []Step, inputs map[string]any) (string, err
 		for _, k := range keys {
 			name := strings.TrimPrefix(k, "$")
 			val := inputs[k]
+			if expr, ok := pythonExprFromValue(val); ok {
+				fmt.Fprintf(&b, "_v_%s = (%s)\n", name, expr)
+				continue
+			}
 			valBytes, err := json.Marshal(val)
 			if err != nil {
 				return "", fmt.Errorf("buildPythonScript: marshal input %q: %w", k, err)
@@ -241,4 +245,30 @@ sys.stdout.write(json.dumps(_outcome))
 // Python (`$` is not an identifier character in Python).
 func mangleVars(src string) string {
 	return varRef.ReplaceAllString(src, "_v_$1")
+}
+
+// pythonExprFromValue recognizes the opt-in `{python_expr: "<expr>"}` input
+// shape. Returns (expr, true) when val is a map containing exactly that single
+// key with a string value; ("", false) otherwise so the caller falls back to
+// JSON binding.
+//
+// The shape is opt-in by design — bare strings stay literal so YAML payloads
+// like 'permissions: 022' aren't accidentally evaluated.
+func pythonExprFromValue(val any) (string, bool) {
+	m, ok := val.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	if len(m) != 1 {
+		return "", false
+	}
+	raw, ok := m["python_expr"]
+	if !ok {
+		return "", false
+	}
+	expr, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	return expr, true
 }
