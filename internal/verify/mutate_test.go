@@ -194,10 +194,10 @@ verification:
 
 func TestMutationStrategyUnsupported(t *testing.T) {
 	skipIfNoPython3(t)
-	// swap_identifier is not implemented; entry must degrade to
+	// remove_kwarg is not implemented; entry must degrade to
 	// tier_unsupported with a message naming the strategy.
 	mutations := `
-    - strategy: swap_identifier
+    - strategy: remove_kwarg
       target: working_approach.action
       token: foo
       new_value: bar
@@ -222,8 +222,8 @@ func TestMutationStrategyUnsupported(t *testing.T) {
 			break
 		}
 	}
-	if !strings.Contains(msg, "swap_identifier") {
-		t.Errorf("message %q does not name swap_identifier", msg)
+	if !strings.Contains(msg, "remove_kwarg") {
+		t.Errorf("message %q does not name remove_kwarg", msg)
 	}
 }
 
@@ -277,12 +277,252 @@ func TestMutationInapplicableSkipped(t *testing.T) {
 	}
 }
 
+// swapBaseYAML is a unit-tier entry whose working branch action invokes a
+// function on a list literal. The function name is interpolated via __FN__
+// and the working-branch return spec via __WORKING_SPEC__ so each swap test
+// can pin a different baseline + spec without rewriting the surrounding
+// scaffolding. The failed branch always returns 0; inputs are empty.
+const swapBaseYAML = `
+unit_id: unit-mutation-swap-test
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns 0
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 0" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: invokes a function on [1,2,3]
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = __FN__([1,2,3])" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: int, value_equals: 0 }
+    working_branch_must_return: __WORKING_SPEC__
+  mutations: __MUTATIONS__
+  timeout_seconds: 5
+`
+
+// buildSwapYAML interpolates the function name, working-branch return spec,
+// and the mutations YAML block into swapBaseYAML.
+func buildSwapYAML(fn, workingSpec, mutations string) string {
+	y := strings.Replace(swapBaseYAML, "__FN__", fn, 1)
+	y = strings.Replace(y, "__WORKING_SPEC__", workingSpec, 1)
+	return strings.Replace(y, "__MUTATIONS__", mutations, 1)
+}
+
+func TestMutationSwapFunctionCall(t *testing.T) {
+	skipIfNoPython3(t)
+	// Baseline working action: $RESULT = sum([1,2,3]) → 6. Spec accepts any
+	// int (no value_equals). Swap sum→max yields max([1,2,3]) → 3, which
+	// still satisfies the spec but differs from the baseline → outcomePass.
+	mutations := `
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: sum
+      new_value: max
+      branch: working_approach
+      expected_result: pass
+`
+	yaml := buildSwapYAML("sum", "{ type: int }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationSwapFunctionCallExpectedFail(t *testing.T) {
+	skipIfNoPython3(t)
+	// Baseline: sum([1,2,3]) → 6, spec: value_equals: 6. Swap to max yields
+	// 3, which violates value_equals → outcomeFail. Mutation declares
+	// expected_result: fail → verified.
+	mutations := `
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: sum
+      new_value: max
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationSwapFunctionCallTargetIsName(t *testing.T) {
+	skipIfNoPython3(t)
+	// Shape B: no token field; target is the bare identifier.
+	mutations := `
+    - strategy: swap_function_call
+      target: sum
+      new_value: max
+      branch: working_approach
+      expected_result: pass
+`
+	yaml := buildSwapYAML("sum", "{ type: int }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationSwapIdentifier(t *testing.T) {
+	skipIfNoPython3(t)
+	// swap_identifier routes through the same helper. Same shape as the
+	// swap_function_call tests; verifies the strategy is supported.
+	mutations := `
+    - strategy: swap_identifier
+      target: working_approach.action
+      token: sum
+      new_value: max
+      branch: working_approach
+      expected_result: pass
+`
+	yaml := buildSwapYAML("sum", "{ type: int }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationSwapWordBoundary(t *testing.T) {
+	skipIfNoPython3(t)
+	// Baseline action references sum_check (which contains "sum"); swap
+	// targets sum→max. Word boundaries should prevent the substring match,
+	// leaving the action unchanged → outcomeUnchanged. Expected: unchanged.
+	// Setup defines sum_check so the working baseline runs successfully.
+	yaml := `
+unit_id: unit-mutation-swap-boundary
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns 0
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 0" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: invokes sum_check
+  setup:
+    - { type: code, lang: python, body: "def sum_check(xs): return sum(xs)" }
+  action:
+    - { type: code, lang: python, body: "$RESULT = sum_check([1,2,3])" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: int, value_equals: 0 }
+    working_branch_must_return: { type: int, value_equals: 6 }
+  mutations:
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: sum
+      new_value: max
+      branch: working_approach
+      expected_result: unchanged
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+func TestMutationSwapInvalidShape(t *testing.T) {
+	skipIfNoPython3(t)
+	// target is a branch path and token is empty → resolveSwapToken errors.
+	mutations := `
+    - strategy: swap_function_call
+      target: working_approach.action
+      new_value: max
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_target_invalid") {
+		t.Fatalf("expected mutation_target_invalid, got %v", res.Reasons)
+	}
+	var msg string
+	for _, r := range res.Reasons {
+		if r.Code == "mutation_target_invalid" {
+			msg = r.Message
+			break
+		}
+	}
+	if !strings.Contains(msg, "needs a token field or a non-path target") {
+		t.Errorf("message %q missing the resolution-rule hint", msg)
+	}
+}
+
+func TestMutationSwapNonStringNewValue(t *testing.T) {
+	skipIfNoPython3(t)
+	// new_value is an int, not a string → applySourceMutation errors.
+	mutations := `
+    - strategy: swap_function_call
+      target: sum
+      new_value: 42
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_target_invalid") {
+		t.Fatalf("expected mutation_target_invalid, got %v", res.Reasons)
+	}
+	var msg string
+	for _, r := range res.Reasons {
+		if r.Code == "mutation_target_invalid" {
+			msg = r.Message
+			break
+		}
+	}
+	if !strings.Contains(msg, "new_value must be a string") {
+		t.Errorf("message %q missing non-string-new_value hint", msg)
+	}
+}
+
 func TestMutationDifferentialFailureBlocks(t *testing.T) {
 	skipIfNoPython3(t)
 	// working spec says value_equals: 18, but action returns 5 →
 	// differential rejects before the mutation pass runs.
 	mutations := `
-    - strategy: swap_identifier
+    - strategy: remove_kwarg
       target: working_approach.action
       token: foo
       new_value: bar

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/runlog/verifier/internal/verify/runner"
@@ -36,8 +37,10 @@ const (
 // supportedStrategies lists the strategies this verifier slice can actually
 // apply. Anything else degrades the entry to tier_unsupported.
 var supportedStrategies = map[string]struct{}{
-	"set_literal_value": {},
-	"mutate_fixture":    {},
+	"set_literal_value":  {},
+	"mutate_fixture":     {},
+	"swap_function_call": {},
+	"swap_identifier":    {},
 }
 
 // runMutations applies each declared mutation and verifies the actual outcome
@@ -71,11 +74,14 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 		return []Reason{{
 			Code: "mutation_strategy_unsupported",
 			Message: fmt.Sprintf(
-				"mutation #%d strategy %q is not yet implemented; supported in this build: set_literal_value, mutate_fixture",
+				"mutation #%d strategy %q is not yet implemented; supported in this build: set_literal_value, mutate_fixture, swap_function_call, swap_identifier",
 				idx+1, m.Strategy,
 			),
 		}}, false
 	}
+
+	isInputStrategy := m.Strategy == "set_literal_value" || m.Strategy == "mutate_fixture"
+	isSourceStrategy := m.Strategy == "swap_function_call" || m.Strategy == "swap_identifier"
 
 	branches := branchesFor(m)
 	var reasons []Reason
@@ -101,17 +107,37 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			continue
 		}
 
-		mutInputs, err := applyInputSubstitution(inputs, m.Target, m.NewValue)
-		if err != nil {
-			reasons = append(reasons, Reason{
-				Code: "mutation_target_invalid",
-				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-					idx+1, m.Strategy, branch, err),
-			})
-			continue
+		var mutInputs map[string]any
+		var mutAction []runner.Step
+
+		switch {
+		case isInputStrategy:
+			subst, err := applyInputSubstitution(inputs, m.Target, m.NewValue)
+			if err != nil {
+				reasons = append(reasons, Reason{
+					Code: "mutation_target_invalid",
+					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
+						idx+1, m.Strategy, branch, err),
+				})
+				continue
+			}
+			mutInputs = subst
+			mutAction = action
+		case isSourceStrategy:
+			rewritten, err := applySourceMutation(action, m)
+			if err != nil {
+				reasons = append(reasons, Reason{
+					Code: "mutation_target_invalid",
+					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
+						idx+1, m.Strategy, branch, err),
+				})
+				continue
+			}
+			mutAction = rewritten
+			mutInputs = inputs
 		}
 
-		got, err := runner.RunPython(setup, action, mutInputs, b.timeout)
+		got, err := runner.RunPython(setup, mutAction, mutInputs, b.timeout)
 		if err != nil {
 			reasons = append(reasons, Reason{
 				Code: "mutation_runner_error",
@@ -283,4 +309,54 @@ func applyInputSubstitution(inputs map[string]any, target string, newValue any) 
 func mapHas(m map[string]any, k string) bool {
 	_, ok := m[k]
 	return ok
+}
+
+// applySourceMutation rewrites the target branch's action source according
+// to a swap_function_call or swap_identifier mutation. Both strategies share
+// the same mechanic: word-boundary substitution of a token with new_value
+// across every step's Body. Returns a fresh []runner.Step; the input is not
+// mutated.
+//
+// Token resolution: m.Token if non-empty; else m.Target if it does not start
+// with a branch-path prefix (`failed_approach.` / `working_approach.`); else
+// error. new_value must be a string.
+func applySourceMutation(steps []runner.Step, m Mutation) ([]runner.Step, error) {
+	token, err := resolveSwapToken(m)
+	if err != nil {
+		return nil, err
+	}
+	replacement, ok := m.NewValue.(string)
+	if !ok {
+		return nil, fmt.Errorf("new_value must be a string for %s, got %T", m.Strategy, m.NewValue)
+	}
+	re, err := regexp.Compile(`\b` + regexp.QuoteMeta(token) + `\b`)
+	if err != nil {
+		return nil, fmt.Errorf("compile token regex %q: %w", token, err)
+	}
+	out := make([]runner.Step, len(steps))
+	for i, s := range steps {
+		out[i] = runner.Step{
+			Type: s.Type,
+			Lang: s.Lang,
+			Body: re.ReplaceAllString(s.Body, replacement),
+		}
+	}
+	return out, nil
+}
+
+// resolveSwapToken implements the swap-mutation token resolution rule:
+//   1. If m.Token is non-empty, use it.
+//   2. Else if m.Target does not start with a branch-path prefix, use it.
+//   3. Else error — the mutation has no usable find-pattern.
+func resolveSwapToken(m Mutation) (string, error) {
+	if m.Token != "" {
+		return m.Token, nil
+	}
+	if m.Target == "" {
+		return "", fmt.Errorf("%s needs a token field or a non-empty target", m.Strategy)
+	}
+	if strings.HasPrefix(m.Target, "failed_approach.") || strings.HasPrefix(m.Target, "working_approach.") {
+		return "", fmt.Errorf("%s needs a token field or a non-path target — got %q with empty token", m.Strategy, m.Target)
+	}
+	return m.Target, nil
 }
