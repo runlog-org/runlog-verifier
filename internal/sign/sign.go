@@ -26,10 +26,20 @@ import (
 // that order is the canonical serialization — do not reorder without bumping
 // the bundle format version.
 type Bundle struct {
-	UnitID      string            `json:"unit_id"`
-	Status      string            `json:"status"`
-	Fingerprint map[string]string `json:"fingerprint"`
+	UnitID       string            `json:"unit_id"`
+	Status       string            `json:"status"`
+	Tier         string            `json:"tier,omitempty"`
+	Reasons      []BundleReason    `json:"reasons,omitempty"`
+	Fingerprint  map[string]string `json:"fingerprint"`
 	// Future: TestResults, MutationResults, CassettePaths
+}
+
+// BundleReason mirrors the verify.Reason struct so the sign package does
+// not depend on the verify package (avoids an import cycle if the verify
+// package later wants to compose Bundles directly).
+type BundleReason struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // Signed wraps a Bundle with its Ed25519 signature and the corresponding

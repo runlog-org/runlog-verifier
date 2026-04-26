@@ -1,10 +1,12 @@
-// Command runlog-verifier is the signed verification agent (Phase 2 stub).
+// Command runlog-verifier is the signed verification agent.
 //
-// Today it accepts a runlog entry YAML, performs structural sanity checks,
-// captures the host fingerprint, and signs a canonical-JSON bundle with
-// an embedded Ed25519 keypair. The differential-execution and mutation-
-// testing phases (docs/03-verification-and-provenance.md §5.3) are not
-// implemented yet — those are the next Phase 2 deliverables.
+// For an `assertion_only` entry the verifier runs the declarative checks
+// from docs/03-verification-and-provenance.md §5.3 — branch presence,
+// non-tautology, mutation structure, mutation discrimination, and
+// primitives-allowlist — and signs a canonical-JSON bundle that records
+// the outcome. `unit` and `integration` entries are accepted as
+// well-formed but exit with status `tier_unsupported`; subprocess
+// execution and cassette replay are still to land in Phase 2.
 //
 // Usage:
 //
@@ -25,7 +27,7 @@ import (
 
 	"github.com/runlog/verifier/internal/fingerprint"
 	"github.com/runlog/verifier/internal/sign"
-	"gopkg.in/yaml.v3"
+	"github.com/runlog/verifier/internal/verify"
 )
 
 // Version and Commit are injected at build time via -ldflags.
@@ -69,12 +71,14 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `runlog-verifier — Runlog signed verification agent (Phase 2 stub)
+	fmt.Fprintln(os.Stderr, `runlog-verifier — Runlog signed verification agent
 
 Usage:
   runlog-verifier verify <entry.yaml>
-        Read entry YAML, validate required fields, capture host fingerprint,
-        sign a canonical-JSON bundle, and emit JSON to stdout.
+        Run declarative verification on an assertion_only entry, capture the
+        host fingerprint, sign a canonical-JSON bundle, and emit JSON to
+        stdout. unit / integration tiers are accepted as well-formed but
+        exit with status tier_unsupported until their runners land.
 
   runlog-verifier keygen
         Generate a fresh Ed25519 keypair and emit JSON to stdout.
@@ -84,24 +88,23 @@ Usage:
   runlog-verifier --version
         Print version string and exit.
 
-Exit codes: 0 success, 1 user error, 2 internal error.`)
+Exit codes:
+  0 verified, 1 user error, 2 internal error,
+  3 rejected, 4 tier not yet implemented.`)
 }
 
 func printVersion() {
 	fmt.Printf("runlog-verifier %s (commit %s)\n", Version, Commit)
 }
 
-// entry is a minimal typed view of the YAML. We only decode the fields
-// required for structural validation; the rest of the document is opaque.
-type entry struct {
-	UnitID          string      `yaml:"unit_id"`
-	Domain          []string    `yaml:"domain"`
-	FailedApproach  interface{} `yaml:"failed_approach"`
-	WorkingApproach interface{} `yaml:"working_approach"`
-}
-
 // runVerify implements the `verify` subcommand.
-// Returns an exit code (0, 1, or 2).
+// Returns an exit code:
+//
+//	0 — entry verified
+//	1 — user error (bad args, unreadable file, malformed YAML)
+//	2 — internal error (keygen / signing failure)
+//	3 — entry rejected (one or more declarative checks failed)
+//	4 — verification tier not yet implemented in this build
 func runVerify(args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -123,32 +126,15 @@ func runVerify(args []string) int {
 		return 1
 	}
 
-	var e entry
-	if err := yaml.Unmarshal(data, &e); err != nil {
-		fmt.Fprintf(os.Stderr, "verify: parse YAML %s: %v\n", path, err)
+	res, err := verify.Run(data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "verify: %v\n", err)
 		return 1
 	}
 
-	// Structural validation: required top-level keys.
-	var missing []string
-	if e.UnitID == "" {
-		missing = append(missing, "unit_id")
-	}
-	if len(e.Domain) == 0 {
-		missing = append(missing, "domain")
-	}
-	if e.FailedApproach == nil {
-		missing = append(missing, "failed_approach")
-	}
-	if e.WorkingApproach == nil {
-		missing = append(missing, "working_approach")
-	}
-	if len(missing) > 0 {
-		fmt.Fprintf(os.Stderr, "verify: entry is missing required fields: %v\n", missing)
-		return 1
-	}
-
-	// Capture the host fingerprint.
+	// Capture the host fingerprint regardless of outcome — the platform
+	// uses it to attribute environment-correlated failures even on
+	// rejected entries.
 	fp := fingerprint.Capture()
 	fpMap := map[string]string{
 		"os":          fp.OS,
@@ -170,9 +156,16 @@ func runVerify(args []string) int {
 		return 2
 	}
 
+	reasons := make([]sign.BundleReason, len(res.Reasons))
+	for i, r := range res.Reasons {
+		reasons[i] = sign.BundleReason{Code: r.Code, Message: r.Message}
+	}
+
 	bundle := sign.Bundle{
-		UnitID:      e.UnitID,
-		Status:      "ok-stub",
+		UnitID:      res.UnitID,
+		Status:      res.Status,
+		Tier:        res.Tier,
+		Reasons:     reasons,
 		Fingerprint: fpMap,
 	}
 
@@ -185,6 +178,8 @@ func runVerify(args []string) int {
 	out := map[string]interface{}{
 		"status":      signed.Bundle.Status,
 		"unit_id":     signed.Bundle.UnitID,
+		"tier":        signed.Bundle.Tier,
+		"reasons":     signed.Bundle.Reasons,
 		"fingerprint": signed.Bundle.Fingerprint,
 		"signature":   signed.Signature,
 		"public_key":  signed.PublicKey,
@@ -196,7 +191,15 @@ func runVerify(args []string) int {
 		fmt.Fprintf(os.Stderr, "verify: encode output: %v\n", err)
 		return 2
 	}
-	return 0
+
+	switch res.Status {
+	case "verified":
+		return 0
+	case "tier_unsupported":
+		return 4
+	default:
+		return 3
+	}
 }
 
 // runKeygen implements the `keygen` subcommand.

@@ -11,13 +11,16 @@ Tamper-evident, reproducible-build binary distributed via package managers (`bre
 ## Layout
 
 - `cmd/runlog-verifier/` — entry point
-- `internal/differential/` — both-branch executor (§5.3)
-- `internal/mutation/` — mutation testing on the working branch
-- `internal/cassette/` — HTTP/RPC recorder for integration-tier entries (§7.5)
+- `internal/verify/` — declarative verification of `assertion_only` entries
+  (branch presence, non-tautology, mutation structure + discrimination,
+  primitives allow-list)
+- `internal/differential/` — both-branch executor for `unit` tier (§5.3) — to land
+- `internal/mutation/` — mutation testing on the working branch — to land
+- `internal/cassette/` — HTTP/RPC recorder for integration-tier entries (§7.5) — to land
 - `internal/fingerprint/` — OS/runtime/package environment capture
-- `internal/sanitize/` — pre-sign allow-list check (§8)
+- `internal/sanitize/` — pre-sign allow-list check (§8) — to land
 - `internal/sign/` — embedded key + bundle signing
-- `internal/token/` — time-limited verification tokens (anti-replay)
+- `internal/token/` — time-limited verification tokens (anti-replay) — to land
 
 ## Depends on
 
@@ -46,8 +49,16 @@ publishing of tagged binaries is deferred to the first Phase 2 release.
 
 ## CLI status
 
-v0.1 stub: structural validation + fingerprint capture + signed bundle.
-Differential execution (§5.3) and mutation testing (§5.3) are the
-next Phase 2 deliverables — not yet implemented. The CLI's output
-shape is stable and the server's `verification_signature` parameter
-already accepts (and ignores) bundles in this format.
+`assertion_only` entries are fully verified declaratively: branch
+presence, non-tautology, mutation structure (schema rules §1–§3),
+mutation discrimination (§5.3 step 4), and the primitives allow-list
+all run on every `verify` call, producing a signed JSON bundle.
+
+`unit` and `integration` tiers parse but exit with status
+`tier_unsupported` (exit code 4) — subprocess execution and cassette
+replay are still to land in Phase 2. The CLI's output shape is stable
+and the server's `verification_signature` parameter already accepts
+(and ignores) bundles in this format.
+
+Exit codes: `0` verified, `1` user error, `2` internal error,
+`3` rejected, `4` tier not yet implemented.
