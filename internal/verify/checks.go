@@ -75,12 +75,7 @@ func checkMutationStructure(e *Entry) []Reason {
 		if m.Strategy == "mutate_fixture" {
 			hasFixture = true
 		}
-		if mutationExpects(m, "fail") {
-			hasFail = true
-		}
-		// "assertion_does_not_match" is the assertion-only equivalent of
-		// "fail" — the test signals that the mutation broke the claim.
-		if mutationExpects(m, "assertion_does_not_match") {
+		if mutationExpectsBreak(m) {
 			hasFail = true
 		}
 		if mutationExpects(m, "unchanged") {
@@ -119,13 +114,13 @@ func checkMutationDiscriminating(e *Entry) []Reason {
 	for _, m := range e.Verification.Mutations {
 		// Targets the working branch explicitly.
 		if m.Branch == "working_approach" || m.Branch == "both" {
-			if m.ExpectedResult == "fail" || m.ExpectedResult == "assertion_does_not_match" {
+			if isBreakLikeOutcome(m.ExpectedResult) {
 				return nil
 			}
 		}
 		// Or via per-branch outcomes.
 		if outcome, ok := m.ExpectedBranchOutcome["working_approach"]; ok {
-			if outcome == "fail" || outcome == "assertion_does_not_match" {
+			if isBreakLikeOutcome(outcome) {
 				return nil
 			}
 		}
@@ -193,6 +188,27 @@ func checkAssertionOnlyShape(e *Entry) []Reason {
 		})
 	}
 	return out
+}
+
+// isBreakLikeOutcome reports whether the raw outcome string signals that a
+// mutation is expected to break the branch — covers both "fail" and the
+// assertion-only alias "assertion_does_not_match".
+func isBreakLikeOutcome(s string) bool {
+	return s == "fail" || s == "assertion_does_not_match"
+}
+
+// mutationExpectsBreak reports whether mutation m expects a break-like
+// outcome on any branch (either via expected_result or expected_branch_outcome).
+func mutationExpectsBreak(m Mutation) bool {
+	if isBreakLikeOutcome(m.ExpectedResult) {
+		return true
+	}
+	for _, v := range m.ExpectedBranchOutcome {
+		if isBreakLikeOutcome(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // mutationExpects reports whether m is asking for the given outcome,

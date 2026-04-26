@@ -1,9 +1,9 @@
 package verify
 
 // registeredPrimitives mirrors the enum on
-// schema/entry.schema.yaml verification.primitives_required.items.enum
-// (lines 412-441 as of 2026-04-26). When the schema's enum changes, this
-// list must be updated to match — the schema is the source of truth.
+// schema/entry.schema.yaml verification.primitives_required.items.enum.
+// The schema is the source of truth; a drift test in primitives_test.go
+// fails CI if this list and the schema enum diverge.
 var registeredPrimitives = map[string]struct{}{
 	"sha1":                       {},
 	"sha256":                     {},

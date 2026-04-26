@@ -143,6 +143,11 @@ func runVerify(args []string) int {
 		"git_commit":  fp.GitCommit,
 		"captured_at": fp.CapturedAt,
 	}
+	if fp.GitAvailable {
+		fpMap["git_available"] = "true"
+	} else {
+		fpMap["git_available"] = "false"
+	}
 	if fp.GitDirty {
 		fpMap["git_dirty"] = "true"
 	} else {

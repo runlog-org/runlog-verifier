@@ -50,24 +50,7 @@ func Run(data []byte) (Result, error) {
 
 	switch tier {
 	case "assertion_only":
-		// Run all checks and aggregate reasons. We run every check even
-		// after the first failure so the submitter sees the full list in
-		// one pass.
-		var reasons []Reason
-		reasons = append(reasons, checkBranchesPresent(&e)...)
-		reasons = append(reasons, checkBranchesDiscriminating(&e)...)
-		reasons = append(reasons, checkAssertionOnlyShape(&e)...)
-		reasons = append(reasons, checkMutationStructure(&e)...)
-		reasons = append(reasons, checkMutationDiscriminating(&e)...)
-		reasons = append(reasons, checkPrimitivesRegistered(&e)...)
-
-		if len(reasons) == 0 {
-			res.Status = "verified"
-			return res, nil
-		}
-		res.Status = "rejected"
-		res.Reasons = reasons
-		return res, nil
+		return runAssertionOnly(&e), nil
 
 	case "unit":
 		return runUnit(&e), nil
@@ -88,4 +71,27 @@ func Run(data []byte) (Result, error) {
 		}}
 		return res, nil
 	}
+}
+
+// runAssertionOnly runs all assertion_only checks and returns the Result.
+// Mirrors the runUnit pattern for symmetry: one call site in Run, all check
+// logic contained here.
+func runAssertionOnly(e *Entry) Result {
+	res := Result{UnitID: e.UnitID, Tier: "assertion_only"}
+
+	var reasons []Reason
+	reasons = append(reasons, checkBranchesPresent(e)...)
+	reasons = append(reasons, checkBranchesDiscriminating(e)...)
+	reasons = append(reasons, checkAssertionOnlyShape(e)...)
+	reasons = append(reasons, checkMutationStructure(e)...)
+	reasons = append(reasons, checkMutationDiscriminating(e)...)
+	reasons = append(reasons, checkPrimitivesRegistered(e)...)
+
+	if len(reasons) == 0 {
+		res.Status = "verified"
+		return res
+	}
+	res.Status = "rejected"
+	res.Reasons = reasons
+	return res
 }

@@ -1,0 +1,42 @@
+import json, sys
+# {{IMPORTS}}
+# {{INPUTS}}# {{SETUP}}# --- action ---
+# {{ACTION_OPEN}}# {{ACTION_BODY}}# {{ACTION_CLOSE}}# --- capture ---
+try:
+    _v_RESULT
+except NameError:
+    sys.stdout.write(json.dumps({"raised": True, "exception": "NameError", "message": "$RESULT was never bound by the action"}))
+    sys.exit(0)
+try:
+    json.dumps(_v_RESULT)
+    _ok = True
+except Exception:
+    _ok = False
+_length = None
+try:
+    _length = len(_v_RESULT)
+except Exception:
+    pass
+
+_element_types = None
+# Iterate only true sequences/sets — exclude strings (would yield char types)
+# and mappings (would yield key types). Bytes/bytearray excluded for the same
+# reason as strings.
+if not isinstance(_v_RESULT, (str, bytes, bytearray, dict)):
+    try:
+        _element_types = [type(x).__name__ for x in _v_RESULT]
+    except Exception:
+        _element_types = None
+
+_outcome = {
+    "raised": False,
+    "type": type(_v_RESULT).__name__,
+    "json_value": _v_RESULT if _ok else None,
+    "json_serializable": _ok,
+    "repr": repr(_v_RESULT),
+}
+if _length is not None:
+    _outcome["length"] = _length
+if _element_types is not None:
+    _outcome["element_types"] = _element_types
+sys.stdout.write(json.dumps(_outcome))

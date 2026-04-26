@@ -14,6 +14,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,9 @@ import (
 	"strings"
 	"time"
 )
+
+//go:embed driver.py.tmpl
+var driverTemplate string
 
 // Step mirrors the relevant fields of the schema's step_fragment. The
 // runner reads only type, lang, and body; additional schema fields are
@@ -146,14 +150,38 @@ func RunPython(setup, action []Step, inputs map[string]any, timeoutSec float64) 
 	return res, nil
 }
 
-// buildPythonScript composes the driver script. Determinism: input
-// variables are sorted by name so two equal entries produce byte-identical
-// scripts. The capture block always emits exactly one JSON object to stdout.
+// buildPythonScript composes the driver script from driver.py.tmpl by filling
+// six explicit placeholders via strings.Replace. Determinism: input variables
+// are sorted by name so two equal entries produce byte-identical scripts. The
+// capture block (static in the template) always emits exactly one JSON object
+// to stdout.
+//
+// Placeholder contract:
+//
+//	# {{IMPORTS}}   — extra top-level imports; "import asyncio\n" for async, "\n" for sync
+//	# {{INPUTS}}    — per-input binding lines (sorted); empty string when no inputs
+//	# {{SETUP}}     — setup step bodies; empty string when no setup
+//	# {{ACTION_OPEN}}  — async: "async def _v_main():\n    global _v_RESULT\n"; sync: "try:\n"
+//	# {{ACTION_BODY}}  — indented action step lines (always 4-space indented)
+//	# {{ACTION_CLOSE}} — async: "\ntry:\n    asyncio.run(_v_main())\nexcept...\n    sys.exit(0)\n\n"
+//	                     sync:  "except BaseException as _exc:\n    ...\n    sys.exit(0)\n\n"
 func buildPythonScript(setup, action []Step, inputs map[string]any) (string, error) {
-	var b strings.Builder
-	b.WriteString("import json, sys\n\n")
+	const excHandler = `except BaseException as _exc:
+    sys.stdout.write(json.dumps({"raised": True, "exception": type(_exc).__name__, "message": str(_exc)}))
+    sys.exit(0)
 
+`
+
+	// --- # {{IMPORTS}} ---
+	imports := "\n" // sync: blank line preserving the empty line after "import json, sys"
+	if actionIsAsync(action) {
+		imports = "import asyncio\n"
+	}
+
+	// --- # {{INPUTS}} ---
+	var inputsSec string
 	if len(inputs) > 0 {
+		var b strings.Builder
 		b.WriteString("# --- inputs ---\n")
 		keys := make([]string, 0, len(inputs))
 		for k := range inputs {
@@ -171,7 +199,7 @@ func buildPythonScript(setup, action []Step, inputs map[string]any) (string, err
 			if err != nil {
 				return "", fmt.Errorf("buildPythonScript: marshal input %q: %w", k, err)
 			}
-			// Re-encoding `valBytes` (already a JSON value) as a JSON string
+			// Re-encoding valBytes (already a JSON value) as a JSON string
 			// yields a Python-valid double-quoted string literal that
 			// json.loads can decode back to the original value at runtime.
 			pyLit, err := json.Marshal(string(valBytes))
@@ -181,9 +209,13 @@ func buildPythonScript(setup, action []Step, inputs map[string]any) (string, err
 			fmt.Fprintf(&b, "_v_%s = json.loads(%s)\n", name, string(pyLit))
 		}
 		b.WriteString("\n")
+		inputsSec = b.String()
 	}
 
+	// --- # {{SETUP}} ---
+	var setupSec string
 	if len(setup) > 0 {
+		var b strings.Builder
 		b.WriteString("# --- setup ---\n")
 		for _, s := range setup {
 			body := strings.TrimRight(mangleVars(s.Body), "\n")
@@ -194,101 +226,54 @@ func buildPythonScript(setup, action []Step, inputs map[string]any) (string, err
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
+		setupSec = b.String()
 	}
 
-	b.WriteString("# --- action ---\n")
+	// --- # {{ACTION_BODY}} ---
+	var bodyLines strings.Builder
+	wroteAction := false
+	for _, s := range action {
+		body := strings.TrimRight(mangleVars(s.Body), "\n")
+		if body == "" {
+			continue
+		}
+		for _, line := range strings.Split(body, "\n") {
+			bodyLines.WriteString("    " + line + "\n")
+			wroteAction = true
+		}
+	}
+	if !wroteAction {
+		bodyLines.WriteString("    pass\n")
+	}
+	actionBody := bodyLines.String()
+
+	// --- # {{ACTION_OPEN}} and # {{ACTION_CLOSE}} ---
+	//
+	// Async path: wrap the action in an async def so that top-level
+	// await/async-with/async-for are syntactically valid. asyncio.run()
+	// drives the coroutine from inside the outer try/except so exceptions
+	// still flow into _exc exactly as the sync path does.
+	//
+	// Sync path: the action body sits directly inside the try block.
+	var actionOpen, actionClose string
 	if actionIsAsync(action) {
-		// Async path: wrap the action in an async def so that top-level
-		// await/async-with/async-for are syntactically valid. asyncio.run()
-		// drives the coroutine from inside the outer try/except so exceptions
-		// still flow into _exc exactly as the sync path does.
-		b.WriteString("import asyncio\n")
-		b.WriteString("async def _v_main():\n")
-		b.WriteString("    global _v_RESULT\n")
-		wroteAction := false
-		for _, s := range action {
-			body := strings.TrimRight(mangleVars(s.Body), "\n")
-			if body == "" {
-				continue
-			}
-			for _, line := range strings.Split(body, "\n") {
-				b.WriteString("    " + line + "\n")
-				wroteAction = true
-			}
-		}
-		if !wroteAction {
-			b.WriteString("    pass\n")
-		}
-		b.WriteString("\n")
-		b.WriteString("try:\n")
-		b.WriteString("    asyncio.run(_v_main())\n")
-		b.WriteString("except BaseException as _exc:\n")
-		b.WriteString(`    sys.stdout.write(json.dumps({"raised": True, "exception": type(_exc).__name__, "message": str(_exc)}))` + "\n")
-		b.WriteString("    sys.exit(0)\n\n")
+		actionOpen = "async def _v_main():\n    global _v_RESULT\n"
+		actionClose = "\ntry:\n    asyncio.run(_v_main())\n" + excHandler
 	} else {
-		// Sync path: emit unchanged — try: / except BaseException as _exc:.
-		b.WriteString("try:\n")
-		wroteAction := false
-		for _, s := range action {
-			body := strings.TrimRight(mangleVars(s.Body), "\n")
-			if body == "" {
-				continue
-			}
-			for _, line := range strings.Split(body, "\n") {
-				b.WriteString("    " + line + "\n")
-				wroteAction = true
-			}
-		}
-		if !wroteAction {
-			b.WriteString("    pass\n")
-		}
-		b.WriteString("except BaseException as _exc:\n")
-		b.WriteString(`    sys.stdout.write(json.dumps({"raised": True, "exception": type(_exc).__name__, "message": str(_exc)}))` + "\n")
-		b.WriteString("    sys.exit(0)\n\n")
+		actionOpen = "try:\n"
+		actionClose = excHandler
 	}
 
-	b.WriteString(`# --- capture ---
-try:
-    _v_RESULT
-except NameError:
-    sys.stdout.write(json.dumps({"raised": True, "exception": "NameError", "message": "$RESULT was never bound by the action"}))
-    sys.exit(0)
-try:
-    json.dumps(_v_RESULT)
-    _ok = True
-except Exception:
-    _ok = False
-_length = None
-try:
-    _length = len(_v_RESULT)
-except Exception:
-    pass
+	// Fill placeholders (each is unique — order is irrelevant).
+	script := driverTemplate
+	script = strings.Replace(script, "# {{IMPORTS}}\n", imports, 1)
+	script = strings.Replace(script, "# {{INPUTS}}", inputsSec, 1)
+	script = strings.Replace(script, "# {{SETUP}}", setupSec, 1)
+	script = strings.Replace(script, "# {{ACTION_OPEN}}", actionOpen, 1)
+	script = strings.Replace(script, "# {{ACTION_BODY}}", actionBody, 1)
+	script = strings.Replace(script, "# {{ACTION_CLOSE}}", actionClose, 1)
 
-_element_types = None
-# Iterate only true sequences/sets — exclude strings (would yield char types)
-# and mappings (would yield key types). Bytes/bytearray excluded for the same
-# reason as strings.
-if not isinstance(_v_RESULT, (str, bytes, bytearray, dict)):
-    try:
-        _element_types = [type(x).__name__ for x in _v_RESULT]
-    except Exception:
-        _element_types = None
-
-_outcome = {
-    "raised": False,
-    "type": type(_v_RESULT).__name__,
-    "json_value": _v_RESULT if _ok else None,
-    "json_serializable": _ok,
-    "repr": repr(_v_RESULT),
-}
-if _length is not None:
-    _outcome["length"] = _length
-if _element_types is not None:
-    _outcome["element_types"] = _element_types
-sys.stdout.write(json.dumps(_outcome))
-`)
-
-	return b.String(), nil
+	return script, nil
 }
 
 // mangleVars rewrites `$VARNAME` → `_v_VARNAME` so step bodies are valid

@@ -305,13 +305,22 @@ func expectedOutcomeFor(m Mutation, k branchKind) (mutationOutcome, bool, bool) 
 	return "", false, false
 }
 
-// canonicalizeBranchOutcome maps the schema's expected_branch_outcome.* enum
-// (the broader of the two — accepts assertion_does_not_match) to the internal
-// outcome enum. assertion_does_not_match folds into outcomeFail (consistent
-// with checkMutationStructure).
-func canonicalizeBranchOutcome(s string) (mutationOutcome, bool, bool) {
+// parseMutationOutcome maps a schema outcome string to the internal enum.
+// When allowAssertionMismatch is true (expected_branch_outcome path) the
+// broader alphabet that includes "assertion_does_not_match" is accepted and
+// folded into outcomeFail. When false (expected_result path) that token is
+// rejected — the CLI path lacks an upstream JSON Schema gate, so a
+// hand-crafted entry with expected_result: assertion_does_not_match must be
+// caught here rather than silently accepted.
+// Returns (outcome, isInapplicable, ok).
+func parseMutationOutcome(s string, allowAssertionMismatch bool) (mutationOutcome, bool, bool) {
 	switch s {
-	case "fail", "assertion_does_not_match":
+	case "assertion_does_not_match":
+		if !allowAssertionMismatch {
+			return "", false, false
+		}
+		return outcomeFail, false, true
+	case "fail":
 		return outcomeFail, false, true
 	case "pass":
 		return outcomePass, false, true
@@ -323,24 +332,17 @@ func canonicalizeBranchOutcome(s string) (mutationOutcome, bool, bool) {
 	return "", false, false
 }
 
+// canonicalizeBranchOutcome maps the schema's expected_branch_outcome.* enum
+// (the broader of the two — accepts assertion_does_not_match) to the internal
+// outcome enum.
+func canonicalizeBranchOutcome(s string) (mutationOutcome, bool, bool) {
+	return parseMutationOutcome(s, true)
+}
+
 // canonicalizeResult maps the schema's expected_result enum (narrower — does
-// NOT accept assertion_does_not_match) to the internal outcome enum. Used at
-// the m.ExpectedResult position only. The CLI path lacks an upstream JSON
-// Schema gate, so a hand-crafted entry with expected_result:
-// assertion_does_not_match would be silently accepted by the broader
-// canonicalizer; this one rejects it.
+// NOT accept assertion_does_not_match) to the internal outcome enum.
 func canonicalizeResult(s string) (mutationOutcome, bool, bool) {
-	switch s {
-	case "fail":
-		return outcomeFail, false, true
-	case "pass":
-		return outcomePass, false, true
-	case "unchanged":
-		return outcomeUnchanged, false, true
-	case "inapplicable":
-		return "", true, true
-	}
-	return "", false, false
+	return parseMutationOutcome(s, false)
 }
 
 // classifyOutcome compares a re-run ExecResult against the un-mutated baseline

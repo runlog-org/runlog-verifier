@@ -16,18 +16,29 @@ import (
 
 // Print holds the captured environment snapshot. All fields are
 // best-effort — the program does not fail if git is unavailable.
+//
+// Git state has three distinct cases:
+//   - git binary not found OR working directory is not a git repo:
+//     GitAvailable=false, GitCommit="", GitDirty=false.
+//   - git found and inside a repo:
+//     GitAvailable=true, GitCommit=<short SHA>, GitDirty=<true|false>.
 type Print struct {
-	OS         string `json:"os"`          // runtime.GOOS
-	Arch       string `json:"arch"`        // runtime.GOARCH
-	GoVersion  string `json:"go_version"`  // runtime.Version()
-	GitCommit  string `json:"git_commit"`  // best-effort; "" on failure
-	GitDirty   bool   `json:"git_dirty"`   // best-effort; false on failure
-	CapturedAt string `json:"captured_at"` // RFC 3339, UTC
+	OS           string `json:"os"`            // runtime.GOOS
+	Arch         string `json:"arch"`          // runtime.GOARCH
+	GoVersion    string `json:"go_version"`    // runtime.Version()
+	GitAvailable bool   `json:"git_available"` // false if git absent or not a repo
+	GitCommit    string `json:"git_commit"`    // short SHA; "" when GitAvailable=false
+	GitDirty     bool   `json:"git_dirty"`     // false when GitAvailable=false
+	CapturedAt   string `json:"captured_at"`   // RFC 3339, UTC
 }
+
+// captureGit is the path used to locate git. Overrideable in tests.
+var captureGit = func() (string, error) { return exec.LookPath("git") }
 
 // Capture collects the current environment. Git fields are populated
 // via exec("git ..."); if git is not installed or the working directory
-// is not a repository, those fields are left at their zero values.
+// is not a repository, GitAvailable is set to false and the remaining
+// git fields are left at their zero values.
 func Capture() Print {
 	p := Print{
 		OS:         runtime.GOOS,
@@ -36,13 +47,23 @@ func Capture() Print {
 		CapturedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Best-effort: resolve HEAD commit short SHA.
-	if out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output(); err == nil {
-		p.GitCommit = strings.TrimSpace(string(out))
+	gitPath, err := captureGit()
+	if err != nil {
+		// git binary not found — GitAvailable stays false.
+		return p
 	}
 
-	// Best-effort: detect uncommitted changes.
-	if out, err := exec.Command("git", "status", "--porcelain").Output(); err == nil {
+	// Resolve HEAD commit short SHA. Failure means we're not in a repo.
+	out, err := exec.Command(gitPath, "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		// Not a git working directory — GitAvailable stays false.
+		return p
+	}
+	p.GitAvailable = true
+	p.GitCommit = strings.TrimSpace(string(out))
+
+	// Detect uncommitted changes (only reachable when we're in a repo).
+	if out, err := exec.Command(gitPath, "status", "--porcelain").Output(); err == nil {
 		p.GitDirty = strings.TrimSpace(string(out)) != ""
 	}
 
