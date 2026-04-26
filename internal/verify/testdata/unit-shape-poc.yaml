@@ -1,0 +1,65 @@
+unit_id: unit-shape-poc-asyncio-pattern
+domain:
+  - python
+  - asyncio
+version_constraints:
+  runtime:
+    name: python
+    version: ">=3.8"
+failed_approach:
+  description: |
+    Returns just the items list with no exception sentinel — drops the failure
+    that asyncio.gather(..., return_exceptions=True) would have surfaced.
+  setup: []
+  action:
+    - type: code
+      lang: python
+      body: "$RESULT = list($ITEMS)"
+  assertion:
+    type: returns
+    expect: fail
+working_approach:
+  description: |
+    Mirrors the asyncio.gather(..., return_exceptions=True) shape — preserves
+    every item AND surfaces the failure as a ValueError in the result list.
+  setup: []
+  action:
+    - type: code
+      lang: python
+      body: "$RESULT = list($ITEMS) + [ValueError('boom')]"
+  assertion:
+    type: returns
+    expect: success
+literals:
+  $LITERAL_1:
+    value: 5
+    reason: number of items in the working set — public test constant
+    category: public_constant
+verification:
+  type: unit
+  isolation: function
+  differential:
+    inputs:
+      $ITEMS: { python_expr: "list(range(5))" }
+    failed_branch_must_return:
+      length: 5
+    working_branch_must_return:
+      length: 6
+      contains_exception_type: ValueError
+  mutations:
+    - strategy: mutate_fixture
+      target: $ITEMS
+      new_value: { python_expr: "list(range(10))" }
+      branch: failed_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $ITEMS
+      new_value: { python_expr: "list(range(5))" }
+      branch: working_approach
+      expected_result: unchanged
+    - strategy: set_literal_value
+      target: $LITERAL_1
+      new_value: 99
+      branch: working_approach
+      expected_result: unchanged
+  timeout_seconds: 5
