@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/runlog/verifier/internal/verify/runner"
 )
@@ -46,6 +47,21 @@ func runUnit(e *Entry) Result {
 	workingAction, err := stepsFromAny(e.WorkingApproach.Action)
 	if err != nil {
 		return rejected(res, "malformed_working_action", err.Error())
+	}
+
+	failedPath, err := returnPathFromDifferential(e.Verification.Differential, "failed_branch_must_return")
+	if err != nil {
+		return rejected(res, "malformed_return_path", err.Error())
+	}
+	workingPath, err := returnPathFromDifferential(e.Verification.Differential, "working_branch_must_return")
+	if err != nil {
+		return rejected(res, "malformed_return_path", err.Error())
+	}
+	if failedPath != "" {
+		failedAction = append(failedAction, pathExtractStep(failedPath))
+	}
+	if workingPath != "" {
+		workingAction = append(workingAction, pathExtractStep(workingPath))
 	}
 
 	failedInputs, workingInputs, err := splitInputs(e.Verification.Differential)
@@ -244,6 +260,52 @@ func splitInputs(diff map[string]any) (failed, working map[string]any, err error
 		return failed, working, nil
 	}
 	return m, m, nil
+}
+
+// returnPathFromDifferential extracts the optional `path:` field from a
+// per-branch return spec block. Empty string means no path extraction.
+// Errors only when the field is present but malformed (non-string).
+func returnPathFromDifferential(diff map[string]any, branchKey string) (string, error) {
+	raw, ok := diff[branchKey]
+	if !ok {
+		return "", nil
+	}
+	spec, ok := raw.(map[string]any)
+	if !ok {
+		return "", nil
+	}
+	p, ok := spec["path"]
+	if !ok {
+		return "", nil
+	}
+	s, ok := p.(string)
+	if !ok {
+		return "", fmt.Errorf("%s.path must be a string, got %T", branchKey, p)
+	}
+	return s, nil
+}
+
+// pathExtractStep builds a runner step that rebinds $RESULT to the value at
+// the given dotted dict-key path. v0.1 supports only string-keyed dot paths
+// (no numeric indices, no attribute access). Embedded dots in keys aren't
+// supported — the path is plain `.`-split.
+//
+// Example: path = "a.b" -> body = "$RESULT = $RESULT['a']['b']"
+//
+// The step runs inside the action's try/except, so a missing key raises
+// KeyError and is captured as a real exception by the existing handler.
+func pathExtractStep(path string) runner.Step {
+	var sb strings.Builder
+	sb.WriteString("$RESULT = $RESULT")
+	for _, key := range strings.Split(path, ".") {
+		// Single-quoted Python string — escape backslashes and single quotes.
+		escaped := strings.ReplaceAll(key, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, "'", `\'`)
+		sb.WriteString("['")
+		sb.WriteString(escaped)
+		sb.WriteString("']")
+	}
+	return runner.Step{Type: "code", Lang: "python", Body: sb.String()}
 }
 
 // matchOutcome compares one branch's ExecResult against the relevant
