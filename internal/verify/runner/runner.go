@@ -64,6 +64,25 @@ var (
 // form `_v_VARNAME` is a valid Python identifier.
 var varRef = regexp.MustCompile(`\$([A-Z][A-Z0-9_]*)`)
 
+// asyncStep detects step bodies that need an asyncio.run wrapper. The pattern
+// matches Python keywords with word boundaries: a bare `await EXPR` statement,
+// an `async with` block, or an `async for` loop. False positives (e.g. the
+// substring "await" inside an identifier or string literal) are tolerated —
+// the wrapper is correct for sync code too, just slightly more complex.
+var asyncStep = regexp.MustCompile(`\b(await|async\s+with|async\s+for)\b`)
+
+// actionIsAsync reports whether any action step body contains async syntax
+// requiring an asyncio.run wrapper. Operates on the raw step body before
+// $-mangling (mangleVars only rewrites $VARS — async keywords pass through).
+func actionIsAsync(action []Step) bool {
+	for _, s := range action {
+		if asyncStep.MatchString(s.Body) {
+			return true
+		}
+	}
+	return false
+}
+
 // RunPython runs setup+action as a Python 3 subprocess with inputs bound
 // as locals. Each `$VARNAME` reference inside step bodies is rewritten to
 // `_v_VARNAME` and the same name (without the `$`) is bound from inputs
@@ -178,24 +197,55 @@ func buildPythonScript(setup, action []Step, inputs map[string]any) (string, err
 	}
 
 	b.WriteString("# --- action ---\n")
-	b.WriteString("try:\n")
-	wroteAction := false
-	for _, s := range action {
-		body := strings.TrimRight(mangleVars(s.Body), "\n")
-		if body == "" {
-			continue
+	if actionIsAsync(action) {
+		// Async path: wrap the action in an async def so that top-level
+		// await/async-with/async-for are syntactically valid. asyncio.run()
+		// drives the coroutine from inside the outer try/except so exceptions
+		// still flow into _exc exactly as the sync path does.
+		b.WriteString("import asyncio\n")
+		b.WriteString("async def _v_main():\n")
+		b.WriteString("    global _v_RESULT\n")
+		wroteAction := false
+		for _, s := range action {
+			body := strings.TrimRight(mangleVars(s.Body), "\n")
+			if body == "" {
+				continue
+			}
+			for _, line := range strings.Split(body, "\n") {
+				b.WriteString("    " + line + "\n")
+				wroteAction = true
+			}
 		}
-		for _, line := range strings.Split(body, "\n") {
-			b.WriteString("    " + line + "\n")
-			wroteAction = true
+		if !wroteAction {
+			b.WriteString("    pass\n")
 		}
+		b.WriteString("\n")
+		b.WriteString("try:\n")
+		b.WriteString("    asyncio.run(_v_main())\n")
+		b.WriteString("except BaseException as _exc:\n")
+		b.WriteString(`    sys.stdout.write(json.dumps({"raised": True, "exception": type(_exc).__name__, "message": str(_exc)}))` + "\n")
+		b.WriteString("    sys.exit(0)\n\n")
+	} else {
+		// Sync path: emit unchanged — try: / except BaseException as _exc:.
+		b.WriteString("try:\n")
+		wroteAction := false
+		for _, s := range action {
+			body := strings.TrimRight(mangleVars(s.Body), "\n")
+			if body == "" {
+				continue
+			}
+			for _, line := range strings.Split(body, "\n") {
+				b.WriteString("    " + line + "\n")
+				wroteAction = true
+			}
+		}
+		if !wroteAction {
+			b.WriteString("    pass\n")
+		}
+		b.WriteString("except BaseException as _exc:\n")
+		b.WriteString(`    sys.stdout.write(json.dumps({"raised": True, "exception": type(_exc).__name__, "message": str(_exc)}))` + "\n")
+		b.WriteString("    sys.exit(0)\n\n")
 	}
-	if !wroteAction {
-		b.WriteString("    pass\n")
-	}
-	b.WriteString("except BaseException as _exc:\n")
-	b.WriteString(`    sys.stdout.write(json.dumps({"raised": True, "exception": type(_exc).__name__, "message": str(_exc)}))` + "\n")
-	b.WriteString("    sys.exit(0)\n\n")
 
 	b.WriteString(`# --- capture ---
 try:

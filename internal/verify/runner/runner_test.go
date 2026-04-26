@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -377,6 +378,125 @@ func TestRunPythonInputPythonExprMultiKeyFallsThrough(t *testing.T) {
 	}
 	if res.TypeName != "dict" {
 		t.Fatalf("type=%q, want dict (multi-key map should not eval)", res.TypeName)
+	}
+}
+
+// skipIfPythonBelow311 skips when the python3 interpreter is older than 3.11
+// (asyncio.TaskGroup landed in 3.11). Tests requiring TaskGroup-specific
+// behavior gate on this in addition to skipIfNoPython.
+func skipIfPythonBelow311(t *testing.T) {
+	t.Helper()
+	out, err := exec.Command("python3", "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')").Output()
+	if err != nil {
+		t.Skipf("python3 version probe failed: %v", err)
+	}
+	s := strings.TrimSpace(string(out))
+	var major, minor int
+	if _, err := fmt.Sscanf(s, "%d.%d", &major, &minor); err != nil {
+		t.Skipf("python3 version parse failed: %q", s)
+	}
+	if major < 3 || (major == 3 && minor < 11) {
+		t.Skipf("python3 %d.%d < 3.11 (asyncio.TaskGroup not available)", major, minor)
+	}
+}
+
+func TestRunPythonAsyncWithTaskGroupRaises(t *testing.T) {
+	skipIfNoPython(t)
+	skipIfPythonBelow311(t)
+	res, err := RunPython(
+		[]Step{{Type: "code", Lang: "python", Body: "import asyncio\n\nasync def slow_ok():\n    await asyncio.sleep(0.01)\n    return 1\n\nasync def quick_fail():\n    raise ValueError(\"boom\")\n"}},
+		[]Step{{Type: "code", Lang: "python", Body: "$RESULT = []\nasync with asyncio.TaskGroup() as tg:\n    tg.create_task(slow_ok())\n    tg.create_task(quick_fail())\n"}},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if !res.Raised {
+		t.Fatalf("expected raised ExceptionGroup, got value type=%q", res.TypeName)
+	}
+	// CPython 3.11+ raises ExceptionGroup; older versions of the test could see BaseExceptionGroup.
+	if res.Exception != "ExceptionGroup" && res.Exception != "BaseExceptionGroup" {
+		t.Fatalf("exception=%q, want ExceptionGroup or BaseExceptionGroup", res.Exception)
+	}
+}
+
+func TestBuildPythonScriptSyncStaysUnwrapped(t *testing.T) {
+	script, err := buildPythonScript(nil, []Step{{Type: "code", Lang: "python", Body: "$RESULT = 18"}}, nil)
+	if err != nil {
+		t.Fatalf("buildPythonScript: %v", err)
+	}
+	if strings.Contains(script, "asyncio.run") {
+		t.Fatalf("sync action should not be wrapped in asyncio.run, got:\n%s", script)
+	}
+	if strings.Contains(script, "async def _v_main") {
+		t.Fatalf("sync action should not emit async def _v_main, got:\n%s", script)
+	}
+	if strings.Contains(script, "import asyncio") {
+		t.Fatalf("sync action should not import asyncio, got:\n%s", script)
+	}
+}
+
+func TestRunPythonAsyncBareAwaitGather(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(
+		[]Step{{Type: "code", Lang: "python", Body: "import asyncio\n\nasync def double(x):\n    await asyncio.sleep(0)\n    return x * 2\n"}},
+		[]Step{{Type: "code", Lang: "python", Body: "$RESULT = await asyncio.gather(double(1), double(2), double(3))"}},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if res.TypeName != "list" {
+		t.Fatalf("type=%q, want list", res.TypeName)
+	}
+	if !bytes.Equal(res.JSONValue, []byte(`[2, 4, 6]`)) {
+		t.Fatalf("json_value=%q, want [2, 4, 6]", string(res.JSONValue))
+	}
+}
+
+func TestRunPythonAsyncWithPythonExprInput(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(
+		[]Step{{Type: "code", Lang: "python", Body: "import asyncio\n\nasync def slow_ok(i):\n    await asyncio.sleep(0)\n    return i\n"}},
+		[]Step{{Type: "code", Lang: "python", Body: "coros = [slow_ok(i) for i in $ITEMS]\n$RESULT = await asyncio.gather(*coros)"}},
+		map[string]any{"$ITEMS": map[string]any{"python_expr": "list(range(3))"}},
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if !bytes.Equal(res.JSONValue, []byte(`[0, 1, 2]`)) {
+		t.Fatalf("json_value=%q, want [0, 1, 2]", string(res.JSONValue))
+	}
+}
+
+func TestRunPythonAsyncSyncSetupAsyncAction(t *testing.T) {
+	skipIfNoPython(t)
+	res, err := RunPython(
+		[]Step{
+			{Type: "code", Lang: "python", Body: "import asyncio"},
+			{Type: "code", Lang: "python", Body: "BASE = 10"},
+		},
+		[]Step{{Type: "code", Lang: "python", Body: "await asyncio.sleep(0)\n$RESULT = BASE + 5"}},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunPython: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected exception: %s: %s", res.Exception, res.Message)
+	}
+	if !bytes.Equal(res.JSONValue, []byte("15")) {
+		t.Fatalf("json_value=%q, want 15", string(res.JSONValue))
 	}
 }
 
