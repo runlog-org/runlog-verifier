@@ -50,11 +50,22 @@ func parseBranchKind(s string) (branchKind, bool) {
 
 // branchBaseline captures one branch's un-mutated execution context so a
 // mutation can be applied as a delta against it.
+//
+// Driver is the runner used to re-run this branch under a mutation. For
+// unit-tier and integration-tier replay it's runner.PythonDriver{} (the
+// driver is stateless, so the same instance serves baseline + mutations).
+// For integration-tier reexecute, the orchestrator constructs a per-branch
+// SubprocessDriver pointing at the branch's tmpdir; the reexecute mutation
+// runner uses the *baseline* Driver only as a fallback identity — it
+// constructs a fresh per-mutation Driver pointing at a fresh per-mutation
+// tmpdir for actual mutation re-runs (per-mutation sandbox isolation
+// invariant, mirrors F19's per-mutation stub).
 type branchBaseline struct {
 	Setup  []runner.Step
 	Action []runner.Step
 	Inputs map[string]any
 	Result runner.ExecResult
+	Driver runner.Driver
 }
 
 // mutationBaseline pairs the per-branch baselines for a unit/function run with
@@ -300,7 +311,15 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			continue
 		}
 
-		got, err := runner.RunPython(baseline.Setup, mutAction, mutInputs, b.Timeout)
+		// Use the per-branch driver when set (F18+F23 path); fall back to
+		// PythonDriver for callers that constructed a baseline before the
+		// Driver field landed. Both forms produce byte-identical behaviour
+		// for the function/Python tier — fallback is purely defensive.
+		drv := baseline.Driver
+		if drv == nil {
+			drv = runner.PythonDriver{}
+		}
+		got, err := drv.Run(baseline.Setup, mutAction, mutInputs, b.Timeout)
 		if err != nil {
 			if errors.Is(err, runner.ErrTimeout) || errors.Is(err, runner.ErrInterpreterMissing) {
 				reasons = append(reasons, Reason{

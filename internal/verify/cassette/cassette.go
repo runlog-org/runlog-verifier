@@ -37,8 +37,23 @@ type Cassette struct {
 	Mode  string
 	Steps map[string]Step
 
+	// Reexecute-mode fields. Nil/empty when Mode != "reexecute". Validated
+	// shape-wise here (tool present, slices well-typed); semantic validation
+	// (tool ∈ supported set, setup_script exit codes) lives in the reexecute
+	// orchestrator.
+	Runtime        *Runtime
+	SetupScript    []string
+	TeardownScript []string
+
 	// Stable ordering of step keys so error messages are deterministic.
 	stepNames []string
+}
+
+// Runtime describes the host CLI a reexecute-mode cassette drives. tool is
+// required; version is advisory in v0.1 (logged, not enforced).
+type Runtime struct {
+	Tool    string
+	Version string
 }
 
 // Step is one recorded HTTP exchange.
@@ -89,9 +104,15 @@ func (c *Cassette) Clone() *Cassette {
 		return nil
 	}
 	out := &Cassette{
-		Mode:      c.Mode,
-		Steps:     make(map[string]Step, len(c.Steps)),
-		stepNames: append([]string(nil), c.stepNames...),
+		Mode:           c.Mode,
+		Steps:          make(map[string]Step, len(c.Steps)),
+		SetupScript:    append([]string(nil), c.SetupScript...),
+		TeardownScript: append([]string(nil), c.TeardownScript...),
+		stepNames:      append([]string(nil), c.stepNames...),
+	}
+	if c.Runtime != nil {
+		rt := *c.Runtime
+		out.Runtime = &rt
 	}
 	for name, step := range c.Steps {
 		out.Steps[name] = Step{
@@ -144,6 +165,32 @@ func Parse(raw map[string]any) (*Cassette, error) {
 		Steps: make(map[string]Step, len(rawSteps)),
 	}
 
+	// Reexecute-mode fields. Parsed unconditionally so a malformed shape on
+	// a replay-mode cassette still surfaces a precise error rather than being
+	// silently ignored. Replay-mode entries that don't declare these fields
+	// just leave them nil/empty.
+	if rawRuntime, ok := raw["runtime"]; ok {
+		rt, err := parseRuntime(rawRuntime)
+		if err != nil {
+			return nil, err
+		}
+		c.Runtime = rt
+	}
+	if rawSetup, ok := raw["setup_script"]; ok {
+		setup, err := parseScriptLines(rawSetup, "setup_script")
+		if err != nil {
+			return nil, err
+		}
+		c.SetupScript = setup
+	}
+	if rawTeardown, ok := raw["teardown_script"]; ok {
+		teardown, err := parseScriptLines(rawTeardown, "teardown_script")
+		if err != nil {
+			return nil, err
+		}
+		c.TeardownScript = teardown
+	}
+
 	// yaml.v3 preserves insertion order for map[string]any only when the map
 	// itself is decoded via yaml.Node — through interface{} it's a plain map
 	// and order is lost. Sort step names alphabetically for stable error
@@ -185,6 +232,45 @@ func Parse(raw map[string]any) (*Cassette, error) {
 		}
 	}
 	return c, nil
+}
+
+// parseRuntime decodes the cassette.runtime block. tool is required; version
+// is optional and advisory.
+func parseRuntime(raw any) (*Runtime, error) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("cassette.runtime must be a mapping (got %T)", raw)
+	}
+	tool, _ := m["tool"].(string)
+	if tool == "" {
+		return nil, errors.New("cassette.runtime.tool is required and must be a non-empty string")
+	}
+	version, _ := m["version"].(string)
+	return &Runtime{Tool: tool, Version: version}, nil
+}
+
+// parseScriptLines decodes a setup_script / teardown_script field. Each
+// element must be a non-empty string; nil/missing input yields a nil slice.
+func parseScriptLines(raw any, fieldName string) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("cassette.%s must be an array of strings (got %T)", fieldName, raw)
+	}
+	out := make([]string, 0, len(list))
+	for i, item := range list {
+		s, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("cassette.%s[%d] must be a string (got %T)", fieldName, i, item)
+		}
+		if s == "" {
+			return nil, fmt.Errorf("cassette.%s[%d] is empty — drop the entry rather than declaring an empty command", fieldName, i)
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }
 
 // parseRequest decodes a "METHOD /path\nHeader: Value\n\nbody" string into a

@@ -238,11 +238,20 @@ func TestRunIntegrationCassetteMalformed(t *testing.T) {
 	}
 }
 
-func TestRunIntegrationReexecuteUnsupported(t *testing.T) {
+func TestRunIntegrationReexecuteIsolationMismatch(t *testing.T) {
+	// integrationGreenYAML uses isolation: http_client; flipping the cassette
+	// mode to reexecute now routes through runReexecute, which only
+	// dispatches under {subprocess, database}. The entry is well-formed but
+	// its isolation isn't a reexecute-mode isolation — surface as
+	// isolation_not_yet_implemented (the precise diagnostic), not the old
+	// cassette_mode_not_yet_implemented blanket.
+	//
+	// A runtime block is added because the schema's allOf gate (and our CLI
+	// fallback in runReexecute) requires it for mode=reexecute.
 	yaml := strings.Replace(
 		integrationGreenYAML,
 		"mode: replay",
-		"mode: reexecute",
+		"mode: reexecute\n    runtime:\n      tool: shell",
 		1,
 	)
 	res, err := Run([]byte(yaml))
@@ -252,8 +261,8 @@ func TestRunIntegrationReexecuteUnsupported(t *testing.T) {
 	if res.Status != "tier_unsupported" {
 		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
 	}
-	if !hasReason(res.Reasons, "cassette_mode_not_yet_implemented") {
-		t.Fatalf("expected cassette_mode_not_yet_implemented, got %v", res.Reasons)
+	if !hasReason(res.Reasons, "isolation_not_yet_implemented") {
+		t.Fatalf("expected isolation_not_yet_implemented, got %v", res.Reasons)
 	}
 }
 

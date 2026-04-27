@@ -96,25 +96,18 @@ func isEnvErr(err error) bool {
 	return errors.Is(err, runner.ErrTimeout) || errors.Is(err, runner.ErrInterpreterMissing)
 }
 
-// runIntegration handles tier == "integration" with isolation: http_client.
-// Mirrors runUnit's structure: shape checks, parse cassette, spin up stub
-// server, drive both branches through it, run mutations, sign on success.
+// runIntegration handles tier == "integration". Cassette mode dispatches:
+//
+//	mode: replay    → this function (HTTP stub + per-branch sequence)
+//	mode: reexecute → runReexecute in reexecute.go (per-branch tmpdir sandbox)
+//
+// Each mode validates its own isolation set: replay accepts only `http_client`;
+// reexecute accepts `subprocess` + `database`. Mismatched (mode, isolation)
+// pairs surface as `isolation_not_yet_implemented` in the mode-specific
+// runner — they're not malformed per se (each value is in the schema enum),
+// just pointed at the wrong runtime path.
 func runIntegration(e *Entry) Result {
 	res := Result{UnitID: e.UnitID, Tier: "integration"}
-
-	if e.Verification.Isolation != "http_client" {
-		res.Status = "tier_unsupported"
-		res.Reasons = []Reason{{
-			Code: "isolation_not_yet_implemented",
-			Message: fmt.Sprintf(
-				"integration isolation %q is not implemented in this verifier "+
-					"build — integration tier ships with isolation: http_client first; "+
-					"database / docker_daemon / subprocess land in follow-up commits",
-				e.Verification.Isolation,
-			),
-		}}
-		return res
-	}
 
 	// ── Cassette parse ────────────────────────────────────────────────
 	cas, err := cassette.Parse(e.Verification.Cassette)
@@ -122,18 +115,30 @@ func runIntegration(e *Entry) Result {
 		return rejected(res, "cassette_malformed", err.Error())
 	}
 	if cas.Mode == "reexecute" {
-		res.Status = "tier_unsupported"
-		res.Reasons = []Reason{{
-			Code: "cassette_mode_not_yet_implemented",
-			Message: "cassette.mode: reexecute is not implemented in this " +
-				"verifier build — replay lands first; reexecute (DB / compiler / " +
-				"filesystem isolations) follows in a later slice",
-		}}
-		return res
+		return runReexecute(e, cas)
 	}
 	if cas.Mode != "replay" {
 		return rejected(res, "cassette_mode_invalid",
 			fmt.Sprintf("cassette.mode must be replay or reexecute, got %q", cas.Mode))
+	}
+
+	// Replay mode only accepts http_client. Reexecute-mode isolations
+	// (subprocess, database) routed via runReexecute above never reach here;
+	// other isolations (compiler, docker_daemon) are tier_unsupported until
+	// their drivers land regardless of mode.
+	if e.Verification.Isolation != "http_client" {
+		res.Status = "tier_unsupported"
+		res.Reasons = []Reason{{
+			Code: "isolation_not_yet_implemented",
+			Message: fmt.Sprintf(
+				"replay-mode integration isolation %q is not implemented — "+
+					"replay supports http_client only; subprocess + database "+
+					"under cassette.mode: reexecute; compiler / docker_daemon "+
+					"land in follow-up commits",
+				e.Verification.Isolation,
+			),
+		}}
+		return res
 	}
 
 	// ── Branch step shape ────────────────────────────────────────────
@@ -280,12 +285,14 @@ func runIntegration(e *Entry) Result {
 			Action: failedAction,
 			Inputs: failedInputs,
 			Result: failedRes,
+			Driver: runner.PythonDriver{},
 		},
 		Working: branchBaseline{
 			Setup:  workingSetup,
 			Action: workingAction,
 			Inputs: workingInputs,
 			Result: workingRes,
+			Driver: runner.PythonDriver{},
 		},
 		Diff:    e.Verification.Differential,
 		Timeout: timeout,

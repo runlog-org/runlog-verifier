@@ -119,16 +119,42 @@ func TestRunUnregisteredPrimitive(t *testing.T) {
 }
 
 func TestRunIntegrationIsolationUnsupported(t *testing.T) {
-	// k8sAssertionOnly declares no isolation; flipping the tier alone hits
-	// the integration runner with an empty isolation, which surfaces as
-	// tier_unsupported / isolation_not_yet_implemented. Replaces the old
-	// tier_not_yet_implemented assertion that fired before integration shipped.
-	yaml := strings.Replace(
-		k8sAssertionOnly,
-		"type: assertion_only",
-		"type: integration",
-		1,
-	)
+	// Integration entry whose cassette parses cleanly but whose isolation
+	// (compiler) doesn't dispatch under either replay or reexecute in v0.1.
+	// The entry must declare a cassette to get past cassette.Parse — an
+	// integration entry without a cassette is rejected as cassette_malformed,
+	// a different (and load-bearing) failure mode tested elsewhere.
+	yaml := `
+unit_id: integration-compiler-unsupported
+domain: [test]
+failed_approach:
+  description: stub
+  setup: []
+  action: [{type: code, lang: shell, body: "true"}]
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: stub
+  setup: []
+  action: [{type: code, lang: shell, body: "true"}]
+  assertion: { type: returns, expect: success }
+verification:
+  type: integration
+  isolation: compiler
+  cassette:
+    mode: reexecute
+    artifact: compiler-stub.cassette.yaml
+    runtime: { tool: shell }
+    captures: [stub]
+    strips: [stub]
+    replay_targets: [stub]
+  differential:
+    failed_branch_must_return: { type: string, value_equals: "" }
+    working_branch_must_return: { type: string, value_equals: "" }
+  mutations:
+    - { strategy: mutate_fixture, target: $X, new_value: 1, expected_result: unchanged }
+    - { strategy: mutate_fixture, target: $X, new_value: 2, expected_result: unchanged }
+  timeout_seconds: 5
+`
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)

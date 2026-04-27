@@ -1,0 +1,304 @@
+package runner
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// skipIfNoBin skips when the named binary is not on PATH. Mirrors
+// skipIfNoPython but accepts any tool name so reexecute tests can gate on
+// `sqlite3`, `git`, etc.
+func skipIfNoBin(t *testing.T, name string) {
+	t.Helper()
+	if _, err := exec.LookPath(name); err != nil {
+		t.Skipf("%s not on PATH", name)
+	}
+}
+
+// newSandbox returns a fresh tmpdir and a t.Cleanup that os.RemoveAll's it.
+// Tests use it instead of MkdirTemp + defer to keep the boilerplate down.
+func newSandbox(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "runlog-subproc-test-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func TestSubprocessShellEcho(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	d := SubprocessDriver{Tool: "shell", Workdir: newSandbox(t)}
+	res, err := d.Run(
+		nil,
+		[]Step{{Type: "code", Lang: "shell", Body: "printf '%s' hi"}},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected raised: %s: %s", res.Exception, res.Message)
+	}
+	if res.TypeName != "string" {
+		t.Fatalf("type=%q, want string", res.TypeName)
+	}
+	if res.Repr != "hi" {
+		t.Fatalf("repr=%q, want hi", res.Repr)
+	}
+	if string(res.JSONValue) != `"hi"` {
+		t.Fatalf("json_value=%s, want \"hi\"", string(res.JSONValue))
+	}
+	if res.Length == nil || *res.Length != 2 {
+		t.Fatalf("length=%v, want *2", res.Length)
+	}
+}
+
+func TestSubprocessShellNonZeroExit(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	d := SubprocessDriver{Tool: "shell", Workdir: newSandbox(t)}
+	res, err := d.Run(
+		nil,
+		[]Step{{Type: "code", Lang: "shell", Body: "echo broken >&2; exit 7"}},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Raised {
+		t.Fatalf("expected raised, got TypeName=%q", res.TypeName)
+	}
+	if res.Exception != "SubprocessError" {
+		t.Fatalf("exception=%q, want SubprocessError", res.Exception)
+	}
+	if !strings.Contains(res.Message, "exited 7") {
+		t.Fatalf("message=%q, want substring 'exited 7'", res.Message)
+	}
+}
+
+func TestSubprocessSetupRunsBeforeAction(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	dir := newSandbox(t)
+	d := SubprocessDriver{Tool: "shell", Workdir: dir}
+	res, err := d.Run(
+		[]Step{{Type: "code", Lang: "shell", Body: "printf '%s' written-by-setup > $WORKDIR/marker"}},
+		[]Step{{Type: "code", Lang: "shell", Body: "cat $WORKDIR/marker"}},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("raised: %s: %s", res.Exception, res.Message)
+	}
+	if res.Repr != "written-by-setup" {
+		t.Fatalf("repr=%q", res.Repr)
+	}
+}
+
+func TestSubprocessVarSubstitution(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	d := SubprocessDriver{Tool: "shell", Workdir: newSandbox(t)}
+	res, err := d.Run(
+		nil,
+		[]Step{{Type: "code", Lang: "shell", Body: "printf '%s-%s' '$NAME' '$VALUE'"}},
+		map[string]any{"$NAME": "alpha", "$VALUE": 42},
+		5,
+	)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Repr != "alpha-42" {
+		t.Fatalf("repr=%q, want alpha-42", res.Repr)
+	}
+}
+
+func TestSubprocessShellRejectsSqlLang(t *testing.T) {
+	d := SubprocessDriver{Tool: "shell", Workdir: newSandbox(t)}
+	_, err := d.Run(
+		nil,
+		[]Step{{Type: "code", Lang: "sql", Body: "SELECT 1"}},
+		nil,
+		5,
+	)
+	if !errors.Is(err, ErrSubprocessTool) {
+		t.Fatalf("expected ErrSubprocessTool, got %v", err)
+	}
+}
+
+func TestSubprocessTimeout(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	d := SubprocessDriver{Tool: "shell", Workdir: newSandbox(t)}
+	_, err := d.Run(
+		nil,
+		[]Step{{Type: "code", Lang: "shell", Body: "sleep 5"}},
+		nil,
+		0.2,
+	)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("expected ErrTimeout, got %v", err)
+	}
+}
+
+func TestSubprocessEmptyAction(t *testing.T) {
+	d := SubprocessDriver{Tool: "shell", Workdir: newSandbox(t)}
+	_, err := d.Run(nil, nil, nil, 5)
+	if !errors.Is(err, ErrEmptyAction) {
+		t.Fatalf("expected ErrEmptyAction, got %v", err)
+	}
+}
+
+func TestSubprocessEmptyWorkdir(t *testing.T) {
+	d := SubprocessDriver{Tool: "shell"} // no Workdir
+	_, err := d.Run(nil, []Step{{Lang: "shell", Body: "true"}}, nil, 5)
+	if err == nil {
+		t.Fatalf("expected error for empty Workdir")
+	}
+}
+
+func TestSubprocessCwdIsWorkdir(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	dir := newSandbox(t)
+	d := SubprocessDriver{Tool: "shell", Workdir: dir}
+	res, err := d.Run(
+		nil,
+		[]Step{{Type: "code", Lang: "shell", Body: "pwd"}},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// pwd may resolve symlinks (e.g. /var → /private/var on macOS); compare
+	// canonical forms.
+	wantPath, _ := filepath.EvalSymlinks(dir)
+	gotPath, _ := filepath.EvalSymlinks(strings.TrimSpace(res.Repr))
+	if gotPath != wantPath {
+		t.Fatalf("pwd=%q, want %q (workdir)", gotPath, wantPath)
+	}
+}
+
+func TestSubprocessSqliteRoundtrip(t *testing.T) {
+	skipIfNoBin(t, "sqlite3")
+	d := SubprocessDriver{Tool: "sqlite", Workdir: newSandbox(t)}
+	res, err := d.Run(
+		[]Step{
+			{Type: "code", Lang: "sql", Body: "CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (3), (4), (5);"},
+		},
+		[]Step{
+			{Type: "code", Lang: "sql", Body: "SELECT SUM(n) FROM t;"},
+		},
+		nil,
+		10,
+	)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("raised: %s: %s", res.Exception, res.Message)
+	}
+	if strings.TrimSpace(res.Repr) != "12" {
+		t.Fatalf("repr=%q, want 12", res.Repr)
+	}
+}
+
+func TestSubprocessSqliteShellMix(t *testing.T) {
+	skipIfNoBin(t, "sqlite3")
+	skipIfNoBin(t, "sh")
+	d := SubprocessDriver{Tool: "sqlite", Workdir: newSandbox(t)}
+	res, err := d.Run(
+		[]Step{
+			{Type: "code", Lang: "sql", Body: "CREATE TABLE t (s TEXT); INSERT INTO t VALUES ('hi');"},
+		},
+		[]Step{
+			{Type: "code", Lang: "shell", Body: "sqlite3 $DB_PATH 'SELECT s FROM t;'"},
+		},
+		nil,
+		10,
+	)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("raised: %s: %s", res.Exception, res.Message)
+	}
+	if strings.TrimSpace(res.Repr) != "hi" {
+		t.Fatalf("repr=%q, want hi", res.Repr)
+	}
+}
+
+func TestSubprocessRunSetupScriptOK(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	dir := newSandbox(t)
+	d := SubprocessDriver{Tool: "shell", Workdir: dir}
+	err := d.RunSetupScript(
+		[]string{"printf '%s' setup-content > $WORKDIR/seeded.txt"},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("RunSetupScript: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "seeded.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "setup-content" {
+		t.Fatalf("file content=%q", string(got))
+	}
+}
+
+func TestSubprocessRunSetupScriptNonZeroFails(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	d := SubprocessDriver{Tool: "shell", Workdir: newSandbox(t)}
+	err := d.RunSetupScript(
+		[]string{"echo before; exit 3"},
+		nil,
+		5,
+	)
+	if !errors.Is(err, ErrSetupScriptFailed) {
+		t.Fatalf("expected ErrSetupScriptFailed, got %v", err)
+	}
+}
+
+func TestSubprocessTeardownTolerantOfNonZero(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	d := SubprocessDriver{Tool: "shell", Workdir: newSandbox(t)}
+	err := d.RunTeardownScript(
+		[]string{"exit 5"},
+		nil,
+		5,
+	)
+	// Non-zero exit during teardown is tolerated; only env errors return.
+	if err != nil {
+		t.Fatalf("teardown should swallow non-zero exit, got %v", err)
+	}
+}
+
+func TestSubstituteVarsLongestKeyFirst(t *testing.T) {
+	// Sanity: $DB_PATH must be substituted before $DB to avoid the prefix
+	// eating the longer name.
+	out := substituteVars(
+		"keep $DB_PATH and $DB",
+		map[string]any{"$DB_PATH": "/x/y", "$DB": "shortcut"},
+	)
+	if out != "keep /x/y and shortcut" {
+		t.Fatalf("substituteVars: %q", out)
+	}
+}
+
+func TestSubstituteVarsLeavesUnknownTokens(t *testing.T) {
+	// Tokens not in inputs (e.g. shell's own $1) must pass through unchanged.
+	out := substituteVars("awk '{print $1}'", map[string]any{"$WORKDIR": "/tmp/x"})
+	if out != "awk '{print $1}'" {
+		t.Fatalf("substituteVars: %q (should not touch $1)", out)
+	}
+}

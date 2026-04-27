@@ -1,0 +1,88 @@
+unit_id: reexecute-shape-poc-shell-uppercase
+domain:
+  - shell-utilities
+  - testdata
+
+# Failed approach: returns the file's literal lowercase content via cat.
+failed_approach:
+  description: |
+    Reads $WORKDIR/file.txt verbatim. Returns lowercase, which differs from
+    the working approach's uppercase result and the value_equals matchers
+    distinguish them.
+  setup: []
+  action:
+    - type: code
+      lang: shell
+      body: cat $WORKDIR/file.txt
+  assertion:
+    type: value_equals
+    expect: fail
+
+# Working approach: pipes through tr a-z A-Z to uppercase before returning.
+working_approach:
+  description: |
+    Reads $WORKDIR/file.txt then upper-cases via tr. Returns "ABC" for
+    a fixture content of "abc" — discriminating both at the differential
+    layer (cat vs tr) and at the mutation layer (swap_function_call:
+    tr → cat collapses it to the failed approach).
+  setup: []
+  action:
+    - type: code
+      lang: shell
+      body: cat $WORKDIR/file.txt | tr a-z A-Z
+  assertion:
+    type: value_equals
+    expect: success
+
+literals:
+  $LITERAL_1:
+    value: abc
+    reason: lowercase fixture content used by both branches and perturbed by the mutate_fixture mutation
+    category: standard_name
+
+verification:
+  type: integration
+  isolation: subprocess
+  cassette:
+    mode: reexecute
+    artifact: reexecute-shape-poc-shell-uppercase.cassette.yaml
+    runtime:
+      tool: shell
+    setup_script:
+      - "printf '%s' '$LITERAL_1' > $WORKDIR/file.txt"
+    captures:
+      - cat $WORKDIR/file.txt as raw lowercase
+      - tr a-z A-Z transform to uppercase
+    strips:
+      - workdir absolute path
+    replay_targets:
+      - sh + cat + tr (POSIX)
+  differential:
+    failed_branch_must_return:
+      type: string
+      value_equals: abc
+    working_branch_must_return:
+      type: string
+      value_equals: ABC
+  mutations:
+    # Fixture mutation: perturb $LITERAL_1 → "xyz". Both branches' must_return
+    # specs (which assert against the un-perturbed canonical values) are
+    # broken — failed returns "xyz" instead of "abc"; working returns "XYZ"
+    # instead of "ABC". Both fail.
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: xyz
+      expected_branch_outcome:
+        failed_approach: fail
+        working_approach: fail
+    # Discriminating source mutation on the working branch: replace `tr` with
+    # `cat`, collapsing the upper-casing pipe into a no-op cat. Working now
+    # returns "abc" — matches the FAILED branch's spec, not its own —
+    # value_equals: ABC rejects, hence outcome: fail.
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: tr
+      new_value: cat
+      branch: working_approach
+      expected_result: fail
+  timeout_seconds: 10
