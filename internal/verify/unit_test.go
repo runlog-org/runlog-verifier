@@ -96,8 +96,11 @@ func TestRunUnitWrongReturnType(t *testing.T) {
 }
 
 func TestRunUnitMissingIsolation(t *testing.T) {
-	// Empty isolation hits the "isolation_not_yet_implemented" tier-unsupported
-	// path without needing to spawn python — runs even on python-less hosts.
+	skipIfNoPython3(t)
+	// Empty isolation defaults to "function" — the dispatcher resolves to
+	// the Python driver and the entry runs as if isolation were declared.
+	// (The schema's allOf branch makes isolation required for type: unit,
+	// so this is the CLI-path defensive fallback only.)
 	// Strip the leading two-space indent so the surrounding mapping stays
 	// at a uniform indentation level (yaml.v3 rejects mid-block dedents).
 	yaml := strings.Replace(unitGreenYAML, "  isolation: function\n", "", 1)
@@ -105,15 +108,18 @@ func TestRunUnitMissingIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.Status != "tier_unsupported" {
-		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
-	}
-	if !hasReason(res.Reasons, "isolation_not_yet_implemented") {
-		t.Fatalf("expected isolation_not_yet_implemented, got %v", res.Reasons)
+	if res.Status != "verified" {
+		t.Fatalf("status=%q (reasons=%v), want verified — empty isolation must default to function",
+			res.Status, res.Reasons)
 	}
 }
 
-func TestRunUnitNonFunctionIsolation(t *testing.T) {
+func TestRunUnitSubprocessIsolation(t *testing.T) {
+	// Schema-recognised but unimplemented in this build — must surface
+	// isolation_unsupported with the requested isolation in the message
+	// so the submitter knows it's an environment / driver gap, not an
+	// entry authoring bug. No python3 needed; the dispatcher returns
+	// before any subprocess is spawned.
 	yaml := strings.Replace(unitGreenYAML, "isolation: function", "isolation: subprocess", 1)
 	res, err := Run([]byte(yaml))
 	if err != nil {
@@ -122,8 +128,64 @@ func TestRunUnitNonFunctionIsolation(t *testing.T) {
 	if res.Status != "tier_unsupported" {
 		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
 	}
-	if !hasReason(res.Reasons, "isolation_not_yet_implemented") {
-		t.Fatalf("expected isolation_not_yet_implemented, got %v", res.Reasons)
+	if !hasReason(res.Reasons, "isolation_unsupported") {
+		t.Fatalf("expected isolation_unsupported, got %v", res.Reasons)
+	}
+	found := false
+	for _, r := range res.Reasons {
+		if r.Code == "isolation_unsupported" && strings.Contains(r.Message, `"subprocess"`) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected isolation_unsupported message naming \"subprocess\", got %v", res.Reasons)
+	}
+}
+
+func TestRunUnitCompilerIsolation(t *testing.T) {
+	// A second schema-recognised-but-unimplemented value, to confirm the
+	// dispatcher names whichever isolation was requested rather than
+	// hard-coding "subprocess".
+	yaml := strings.Replace(unitGreenYAML, "isolation: function", "isolation: compiler", 1)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "tier_unsupported" {
+		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "isolation_unsupported") {
+		t.Fatalf("expected isolation_unsupported, got %v", res.Reasons)
+	}
+	found := false
+	for _, r := range res.Reasons {
+		if r.Code == "isolation_unsupported" && strings.Contains(r.Message, `"compiler"`) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected isolation_unsupported message naming \"compiler\", got %v", res.Reasons)
+	}
+}
+
+func TestRunUnitUnknownIsolation(t *testing.T) {
+	// A value outside the schema enum entirely — the dispatcher distinguishes
+	// "schema-recognised but unimplemented" (isolation_unsupported) from
+	// "not in the schema at all" (isolation_unknown) so the submitter gets
+	// the right diagnostic. The schema-side validator typically rejects
+	// these upstream of the verifier; this is the CLI defensive path.
+	yaml := strings.Replace(unitGreenYAML, "isolation: function", "isolation: bogus_value", 1)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "tier_unsupported" {
+		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "isolation_unknown") {
+		t.Fatalf("expected isolation_unknown, got %v", res.Reasons)
 	}
 }
 

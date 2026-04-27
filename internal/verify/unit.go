@@ -7,21 +7,66 @@ import (
 	"github.com/runlog/verifier/internal/verify/runner"
 )
 
-// runUnit handles tier == "unit". v0.1 supports isolation == "function"
-// with python code steps; everything else returns tier_unsupported with a
-// specific reason so the submitter knows what to fix or wait for.
+// schemaIsolations is the full enum from schema/entry.schema.yaml's
+// verification.isolation field. The dispatcher uses it to distinguish
+// "schema-recognised but unimplemented in this build" (→ isolation_unsupported)
+// from "not in the schema at all" (→ isolation_unknown). Keeping the list
+// hard-coded next to the dispatcher means adding a schema value forces a
+// touch here — the schema's enum definition stays the single source of
+// truth, and this list is the dispatcher's cached view of it.
+var schemaIsolations = map[string]bool{
+	"function":      true,
+	"subprocess":    true,
+	"compiler":      true,
+	"database":      true,
+	"http_client":   true,
+	"docker_daemon": true,
+}
+
+// runUnit handles tier == "unit". The schema's verification.isolation
+// field selects the driver; today only "function" resolves to a real
+// driver (Python-in-subprocess via runner.PythonDriver). Other values
+// declared by the schema are recognised and degrade to tier_unsupported
+// with isolation_unsupported so the submitter knows the entry is well-
+// formed but waiting on driver work; values not in the schema enum at
+// all degrade to tier_unsupported with isolation_unknown so the
+// submitter knows it's an authoring bug.
 func runUnit(e *Entry) Result {
 	res := Result{UnitID: e.UnitID, Tier: "unit"}
 
+	// Default to function when the field is empty — preserves the
+	// pre-dispatcher behaviour for entries that omit the field. The
+	// schema's allOf branch makes isolation required for type: unit,
+	// so this fallback is mostly defensive (CLI-path entries without
+	// upstream JSON-schema validation could still arrive empty).
 	iso := e.Verification.Isolation
-	if iso != "function" {
+	if iso == "" {
+		iso = "function"
+	}
+
+	driver, registered := runner.DriverFor(iso)
+	if !registered {
+		if schemaIsolations[iso] {
+			res.Status = "tier_unsupported"
+			res.Reasons = []Reason{{
+				Code: "isolation_unsupported",
+				Message: fmt.Sprintf(
+					"isolation %q is recognised by the schema but not implemented "+
+						"in this verifier build — function isolation ships first; "+
+						"subprocess / compiler / database / http_client / "+
+						"docker_daemon land in follow-up commits",
+					iso,
+				),
+			}}
+			return res
+		}
 		res.Status = "tier_unsupported"
 		res.Reasons = []Reason{{
-			Code: "isolation_not_yet_implemented",
+			Code: "isolation_unknown",
 			Message: fmt.Sprintf(
-				"isolation %q is not implemented in this verifier build — "+
-					"unit tier ships with isolation: function first; subprocess / "+
-					"compiler / database / http_client land in follow-up commits",
+				"isolation %q is not in the schema enum — accepted values are "+
+					"function, subprocess, compiler, database, http_client, "+
+					"docker_daemon",
 				iso,
 			),
 		}}
@@ -70,11 +115,11 @@ func runUnit(e *Entry) Result {
 
 	timeout := e.Verification.TimeoutSeconds
 
-	failedRes, err := runner.RunPython(failedSetup, failedAction, failedInputs, timeout)
+	failedRes, err := driver.Run(failedSetup, failedAction, failedInputs, timeout)
 	if err != nil {
 		return runnerError(res, "failed_approach", err)
 	}
-	workingRes, err := runner.RunPython(workingSetup, workingAction, workingInputs, timeout)
+	workingRes, err := driver.Run(workingSetup, workingAction, workingInputs, timeout)
 	if err != nil {
 		return runnerError(res, "working_approach", err)
 	}
