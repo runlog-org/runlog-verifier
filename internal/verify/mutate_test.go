@@ -407,8 +407,12 @@ func TestMutationSwapIdentifier(t *testing.T) {
 func TestMutationSwapWordBoundary(t *testing.T) {
 	skipIfNoPython3(t)
 	// Baseline action references sum_check (which contains "sum"); swap
-	// targets sum→max. Word boundaries should prevent the substring match,
-	// leaving the action unchanged → outcomeUnchanged. Expected: unchanged.
+	// targets sum→max. Word boundaries prevent the substring match — there
+	// is no \b between "m" and "_" since "_" is a word character. After the
+	// Bug 1 zero-match guard landed, this is no longer a silent
+	// outcome=unchanged path: applySourceMutation surfaces a typed error,
+	// runOneMutation rejects the mutation as mutation_target_invalid, and
+	// the seed author sees the offending token in the message.
 	// Setup defines sum_check so the working baseline runs successfully.
 	yaml := `
 unit_id: unit-mutation-swap-boundary
@@ -446,8 +450,23 @@ verification:
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.Status != "verified" {
-		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_target_invalid") {
+		t.Fatalf("expected mutation_target_invalid, got %v", res.Reasons)
+	}
+	var msg string
+	for _, r := range res.Reasons {
+		if r.Code == "mutation_target_invalid" {
+			msg = r.Message
+			break
+		}
+	}
+	for _, want := range []string{`"sum"`, "did not match anywhere"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
 	}
 }
 
@@ -917,5 +936,290 @@ verification:
 	}
 	if res.Status != "verified" {
 		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+// --- Bug 1: zero-match diagnostic for source-mutating strategies ------------
+
+func TestMutationSwapFunctionCallTokenWithNonWordCharsRejected(t *testing.T) {
+	skipIfNoPython3(t)
+	// Real-world regression from the F19 seed-migration session: a seed
+	// author wrote swap_function_call with token "== 204" intending to break
+	// a status-code predicate. The compiled regex `\b== 204\b` matches
+	// nowhere because `=` and ` ` are non-word chars, so `\b=` never
+	// anchors. The mutation silently no-opped, classified `unchanged`, and
+	// gave no diagnostic. After Bug 1 the verifier rejects the mutation
+	// with a typed reason naming the offending token.
+	yaml := `
+unit_id: unit-mutation-swap-nonword-token
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns 0
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 0" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: returns the constant 204
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 204" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: int, value_equals: 0 }
+    working_branch_must_return: { type: int, value_equals: 204 }
+  mutations:
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: "== 204"
+      new_value: "== 999"
+      branch: working_approach
+      expected_result: fail
+  timeout_seconds: 5
+`
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_target_invalid") {
+		t.Fatalf("expected mutation_target_invalid, got %v", res.Reasons)
+	}
+	var msg string
+	for _, r := range res.Reasons {
+		if r.Code == "mutation_target_invalid" {
+			msg = r.Message
+			break
+		}
+	}
+	for _, want := range []string{`"== 204"`, "did not match anywhere"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestMutationSwapIdentifierUnknownTokenRejected(t *testing.T) {
+	skipIfNoPython3(t)
+	// swap_identifier with a token that doesn't exist anywhere in the
+	// action source. Pre-Bug-1 this silently no-opped to outcomeUnchanged;
+	// now it surfaces as mutation_target_invalid.
+	mutations := `
+    - strategy: swap_identifier
+      target: working_approach.action
+      token: NoSuchSymbol
+      new_value: max
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_target_invalid") {
+		t.Fatalf("expected mutation_target_invalid, got %v", res.Reasons)
+	}
+	var msg string
+	for _, r := range res.Reasons {
+		if r.Code == "mutation_target_invalid" {
+			msg = r.Message
+			break
+		}
+	}
+	for _, want := range []string{`"NoSuchSymbol"`, "did not match anywhere"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestMutationRemoveKwargUnknownTokenRejected(t *testing.T) {
+	skipIfNoPython3(t)
+	// remove_kwarg / drop_flag share applyRemoveMutation. A token that
+	// doesn't appear anywhere in the source must error out with the same
+	// shape as the swap variants — silent no-op was a parallel bug.
+	mutations := `
+    - strategy: remove_kwarg
+      target: working_approach.action
+      token: ", reverse=Nope"
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_target_invalid") {
+		t.Fatalf("expected mutation_target_invalid, got %v", res.Reasons)
+	}
+	var msg string
+	for _, r := range res.Reasons {
+		if r.Code == "mutation_target_invalid" {
+			msg = r.Message
+			break
+		}
+	}
+	for _, want := range []string{`", reverse=Nope"`, "did not appear anywhere"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+}
+
+// --- Bug 2: non-discriminating source rewrite diagnostic --------------------
+
+// discrimYAML uses a local-only identifier `result` inside the working
+// approach, then assigns it to $RESULT. Renaming `result` consistently to
+// `outcome` rewrites the source byte-for-byte but produces an identical
+// observable output — Python doesn't care what locals are named.
+const discrimYAML = `
+unit_id: unit-mutation-discriminate-test
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: returns 0
+  setup: []
+  action:
+    - { type: code, lang: python, body: "$RESULT = 0" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: computes via a local named "result"
+  setup: []
+  action:
+    - { type: code, lang: python, body: "result = sum([1,2,3])\n$RESULT = result" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: function
+  differential:
+    failed_branch_must_return: { type: int, value_equals: 0 }
+    working_branch_must_return: { type: int, value_equals: 6 }
+  mutations: __MUTATIONS__
+  timeout_seconds: 5
+`
+
+func buildDiscrimYAML(mutations string) string {
+	return strings.Replace(discrimYAML, "__MUTATIONS__", mutations, 1)
+}
+
+func TestMutationConsistentRenameDoesNotDiscriminate(t *testing.T) {
+	skipIfNoPython3(t)
+	// swap_identifier rewrites both occurrences of `result` to `outcome`.
+	// Source is byte-different from baseline; observable behaviour is
+	// identical. Mutation declares expected_result: fail → must reject
+	// with the new mutation_did_not_discriminate reason, not the generic
+	// mutation_outcome_mismatch.
+	mutations := `
+    - strategy: swap_identifier
+      target: working_approach.action
+      token: result
+      new_value: outcome
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildDiscrimYAML(mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_did_not_discriminate") {
+		t.Fatalf("expected mutation_did_not_discriminate, got %v", res.Reasons)
+	}
+	if hasReason(res.Reasons, "mutation_outcome_mismatch") {
+		t.Fatalf("did_not_discriminate should replace generic mismatch, got both: %v", res.Reasons)
+	}
+	var msg string
+	for _, r := range res.Reasons {
+		if r.Code == "mutation_did_not_discriminate" {
+			msg = r.Message
+			break
+		}
+	}
+	for _, want := range []string{
+		"rewrote source but produced no behavioural change",
+		`"result"`,
+		"swap_identifier",
+		"working_approach",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestMutationConsistentRenameExpectedUnchangedIsLegitimate(t *testing.T) {
+	skipIfNoPython3(t)
+	// Same mutation shape as the previous test, but expected_result:
+	// unchanged. This is the legitimate path — submitter knew the rename
+	// is observationally inert and is asserting it. No diagnostic should
+	// fire and the entry verifies green.
+	mutations := `
+    - strategy: swap_identifier
+      target: working_approach.action
+      token: result
+      new_value: outcome
+      branch: working_approach
+      expected_result: unchanged
+`
+	yaml := buildDiscrimYAML(mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+	if hasReason(res.Reasons, "mutation_did_not_discriminate") {
+		t.Fatalf("did_not_discriminate must not fire on expected_result: unchanged: %v", res.Reasons)
+	}
+}
+
+func TestMutationInputSubstUnchangedDoesNotTriggerDiscriminationHint(t *testing.T) {
+	skipIfNoPython3(t)
+	// Bug 2 only applies to source-mutating strategies. mutate_fixture and
+	// set_literal_value rebind an input — an unchanged outcome there means
+	// the new value happened to behave identically (e.g. assigning $X=5
+	// when the baseline already had $X=5). That's a different problem and
+	// must NOT trigger the source-rewrite hint. Here we set new_value back
+	// to the same baseline value so outcome is `unchanged`, and declare
+	// expected_result: fail. Result: generic mutation_outcome_mismatch
+	// fires; mutation_did_not_discriminate does NOT.
+	mutations := `
+    - strategy: set_literal_value
+      target: $X
+      new_value: 5
+      branch: working_approach
+      expected_result: fail
+`
+	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_outcome_mismatch") {
+		t.Fatalf("expected mutation_outcome_mismatch (input-subst out of scope for Bug 2), got %v", res.Reasons)
+	}
+	if hasReason(res.Reasons, "mutation_did_not_discriminate") {
+		t.Fatalf("did_not_discriminate must not fire for input-substitution strategies: %v", res.Reasons)
 	}
 }

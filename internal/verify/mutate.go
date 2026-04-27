@@ -147,6 +147,33 @@ var strategies = map[string]strategy{
 	"drop_flag":          sourceRemoveStrategy{},
 }
 
+// sourceMutatingStrategies enumerates the strategies that rewrite the action
+// source rather than the inputs map. The non-discrimination diagnostic
+// (Bug 2 / mutation_did_not_discriminate) only fires for these — for input-
+// substitution strategies, an `unchanged` outcome is a different problem
+// (the new value happened to behave identically, not a tautological rename).
+var sourceMutatingStrategies = map[string]bool{
+	"swap_function_call": true,
+	"swap_identifier":    true,
+	"remove_kwarg":       true,
+	"drop_flag":          true,
+}
+
+// stepBodiesEqual returns true when two step slices have byte-identical
+// bodies in the same order. Used to detect whether a source-mutating
+// strategy actually rewrote anything before classifying the outcome.
+func stepBodiesEqual(a, b []runner.Step) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Body != b[i].Body {
+			return false
+		}
+	}
+	return true
+}
+
 // supportedStrategiesMessage renders the sorted list of registered strategy
 // names for inclusion in the mutation_strategy_unsupported Reason — keeps the
 // message stable and self-updating when new strategies land.
@@ -265,6 +292,31 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 
 		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
 		if actual != expected {
+			// Diagnostic refinement: when a source-mutating strategy
+			// rewrote the action (so the regex / strings.ReplaceAll did
+			// match) but the program's observable behaviour was
+			// identical, the submitter picked a token that doesn't
+			// actually discriminate — typically a local identifier
+			// that's renamed consistently throughout, or a call that
+			// has the same return value as the swap target. Replace
+			// the generic mutation_outcome_mismatch reason with a
+			// targeted hint so the seed author knows what to fix.
+			if expected == outcomeFail &&
+				actual == outcomeUnchanged &&
+				sourceMutatingStrategies[m.Strategy] &&
+				!stepBodiesEqual(baseline.Action, mutAction) {
+				token, _ := resolveSwapToken(m)
+				reasons = append(reasons, Reason{
+					Code: "mutation_did_not_discriminate",
+					Message: fmt.Sprintf(
+						"mutation #%d (%s) on %s: rewrote source but produced no behavioural change. "+
+							"The token %q was substituted in the action source but the program's observable "+
+							"output was byte-identical to the baseline. Pick a token that actually discriminates "+
+							"(a literal value, a function name with side effects, or a flag).",
+						idx+1, m.Strategy, branch, token),
+				})
+				continue
+			}
 			reasons = append(reasons, Reason{
 				Code: "mutation_outcome_mismatch",
 				Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
@@ -454,6 +506,15 @@ func mapHas(m map[string]any, k string) bool {
 // Token resolution: m.Token if non-empty; else m.Target if it does not start
 // with a branch-path prefix (`failed_approach.` / `working_approach.`); else
 // error. new_value must be a string.
+//
+// Zero-match guard: the `\b` word-boundary metacharacter only anchors between
+// a word character ([A-Za-z0-9_]) and a non-word character. Tokens whose
+// endpoints are non-word characters (e.g. "== 204") compile fine but never
+// match — the rewrite silently no-ops and the mutation classifies as
+// `unchanged`. To prevent that silent failure, count actual substitutions and
+// return an error if the token did not match anywhere in any step body. The
+// caller surfaces this as `mutation_target_invalid`, naming the offending
+// token so the seed author can pick a discriminating one.
 func applySourceMutation(steps []runner.Step, m Mutation) ([]runner.Step, error) {
 	token, err := resolveSwapToken(m)
 	if err != nil {
@@ -468,12 +529,21 @@ func applySourceMutation(steps []runner.Step, m Mutation) ([]runner.Step, error)
 		return nil, fmt.Errorf("compile token regex %q: %w", token, err)
 	}
 	out := make([]runner.Step, len(steps))
+	matches := 0
 	for i, s := range steps {
+		matches += len(re.FindAllStringIndex(s.Body, -1))
 		out[i] = runner.Step{
 			Type: s.Type,
 			Lang: s.Lang,
 			Body: re.ReplaceAllString(s.Body, replacement),
 		}
+	}
+	if matches == 0 {
+		return nil, fmt.Errorf(
+			"token %q did not match anywhere in the action source — "+
+				"note that \\b word boundaries only anchor on [A-Za-z0-9_]; "+
+				"a token with leading/trailing non-word characters (e.g. operators, spaces) will never match. "+
+				"Pick a bare identifier or function name", token)
 	}
 	return out, nil
 }
@@ -489,18 +559,31 @@ func applySourceMutation(steps []runner.Step, m Mutation) ([]runner.Step, error)
 //
 // Token resolution reuses resolveSwapToken (m.Token if non-empty; else
 // m.Target when not branch-path-prefixed; else error).
+//
+// Zero-match guard: like applySourceMutation, count substitutions and surface
+// a typed error if the token never appears in the action source. Without this
+// the strings.ReplaceAll call silently no-ops and the mutation classifies as
+// `unchanged`, hiding the typo from the seed author.
 func applyRemoveMutation(steps []runner.Step, m Mutation) ([]runner.Step, error) {
 	token, err := resolveSwapToken(m)
 	if err != nil {
 		return nil, err
 	}
+	matches := 0
 	out := make([]runner.Step, len(steps))
 	for i, s := range steps {
+		matches += strings.Count(s.Body, token)
 		out[i] = runner.Step{
 			Type: s.Type,
 			Lang: s.Lang,
 			Body: strings.ReplaceAll(s.Body, token, ""),
 		}
+	}
+	if matches == 0 {
+		return nil, fmt.Errorf(
+			"token %q did not appear anywhere in the action source — "+
+				"check for typos or punctuation/whitespace mismatches (the verifier matches verbatim)",
+			token)
 	}
 	return out, nil
 }
