@@ -55,17 +55,16 @@ func Run(data []byte) (Result, error) {
 	case "unit":
 		return runUnit(&e), nil
 
+	case "integration":
+		return runIntegration(&e), nil
+
 	default:
-		// integration or any unknown tier — accepted as well-formed YAML
-		// but not yet executed by this build.
+		// Unknown tier — accepted as well-formed YAML but not executable.
 		res.Status = "tier_unsupported"
 		res.Reasons = []Reason{{
 			Code: "tier_not_yet_implemented",
 			Message: fmt.Sprintf(
-				"verification tier %q is not implemented in this verifier "+
-					"build — Phase 2 ships assertion_only and unit (isolation: "+
-					"function) first; integration lands with cassette replay "+
-					"in a follow-up commit",
+				"verification tier %q is not implemented in this verifier build",
 				tier,
 			),
 		}}

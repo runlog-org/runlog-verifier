@@ -1,0 +1,134 @@
+unit_id: integration-shape-poc-http-retry-on-502
+domain:
+  - http
+  - integration
+version_constraints:
+  runtime:
+    name: python
+    version: ">=3.8"
+
+# Failed approach: hit the upstream once, treat the 502 as a hard error.
+failed_approach:
+  description: |
+    Single POST that surfaces the upstream 502 as the operation's result —
+    no retry, no idempotency-aware backoff. A flaky upstream poisons the
+    pipeline.
+  setup: []
+  action:
+    - type: code
+      lang: python
+      body: |
+        import json, urllib.request
+        req = urllib.request.Request(f"{$ENDPOINT}/v1/charges", method="POST")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, data=b"{}") as resp:
+                $RESULT = {"status": resp.status}
+        except urllib.error.HTTPError as e:
+            $RESULT = {"status": e.code}
+  assertion:
+    type: returns
+    expect: fail
+
+# Working approach: retry once on a 5xx, accept the eventual 200.
+working_approach:
+  description: |
+    POST, observe the 502, retry once. Two requests total. The retry pattern
+    is idempotency-aware — same path, same method, same body, distinct
+    cassette steps modeling the upstream's transient-failure-then-recovery.
+  setup: []
+  action:
+    - type: code
+      lang: python
+      body: |
+        import json, urllib.request, urllib.error
+        url = f"{$ENDPOINT}/v1/charges"
+        for _ in range(2):
+            req = urllib.request.Request(url, method="POST")
+            req.add_header("Content-Type", "application/json")
+            try:
+                with urllib.request.urlopen(req, data=b"{}") as resp:
+                    $RESULT = {"status": resp.status}
+                    break
+            except urllib.error.HTTPError as e:
+                $RESULT = {"status": e.code}
+                if 500 <= e.code < 600:
+                    continue
+                break
+
+  assertion:
+    type: returns
+    expect: success
+
+verification:
+  type: integration
+  isolation: http_client
+  cassette:
+    mode: replay
+    artifact: integration-poc-http-retry.cassette.yaml
+    steps:
+      charges-502:
+        request: |
+          POST /v1/charges
+          Content-Type: application/json
+
+          {}
+        response: |
+          502 Bad Gateway
+          Content-Type: application/json
+
+          {"error":"upstream timeout"}
+      charges-200:
+        request: |
+          POST /v1/charges
+          Content-Type: application/json
+
+          {}
+        response: |
+          200 OK
+          Content-Type: application/json
+
+          {"id":"ch_001","status":"succeeded"}
+    captures:
+      - "POST /v1/charges → 502 transient upstream"
+      - "POST /v1/charges → 200 on retry"
+    strips:
+      - "Authorization, Stripe-Signature, body amount field"
+    replay_targets:
+      - "any HTTP/1.1 client speaking POST application/json"
+  differential:
+    failed_approach_replay_sequence:
+      - charges-502
+    working_approach_replay_sequence:
+      - charges-502
+      - charges-200
+    failed_branch_must_return:
+      type: dict
+      value_equals: { status: 502 }
+    working_branch_must_return:
+      type: dict
+      value_equals: { status: 200 }
+  mutations:
+    # Fixture mutation: bump the failed-branch input by removing the retry
+    # window — equivalent to mutating a fixture, since v0.1 input substitution
+    # is the available shape.
+    - strategy: mutate_fixture
+      target: $LITERAL_NOOP
+      new_value: 1
+      branch: failed_approach
+      expected_result: unchanged
+    # Discriminating mutation on working_approach: rewrite the for-loop bound
+    # so only one attempt is made — the working branch should now stop after
+    # the 502, returning the wrong status, hence outcome: fail.
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: range
+      new_value: "((lambda *_: [0]))"
+      branch: working_approach
+      expected_result: fail
+  timeout_seconds: 10
+literals:
+  $LITERAL_NOOP:
+    value: 1
+    reason: opaque sentinel for the mutate_fixture mutation — not referenced by either branch
+    category: public_constant

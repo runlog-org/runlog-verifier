@@ -118,7 +118,11 @@ func TestRunUnregisteredPrimitive(t *testing.T) {
 	}
 }
 
-func TestRunIntegrationTierUnsupported(t *testing.T) {
+func TestRunIntegrationIsolationUnsupported(t *testing.T) {
+	// k8sAssertionOnly declares no isolation; flipping the tier alone hits
+	// the integration runner with an empty isolation, which surfaces as
+	// tier_unsupported / isolation_not_yet_implemented. Replaces the old
+	// tier_not_yet_implemented assertion that fired before integration shipped.
 	yaml := strings.Replace(
 		k8sAssertionOnly,
 		"type: assertion_only",
@@ -130,7 +134,29 @@ func TestRunIntegrationTierUnsupported(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if res.Status != "tier_unsupported" {
-		t.Fatalf("expected tier_unsupported, got %q", res.Status)
+		t.Fatalf("expected tier_unsupported, got %q (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "isolation_not_yet_implemented") {
+		t.Fatalf("expected isolation_not_yet_implemented, got %v", res.Reasons)
+	}
+}
+
+func TestRunUnknownTierUnsupported(t *testing.T) {
+	// A tier that isn't in the switch dispatches to the default arm and gets
+	// tier_not_yet_implemented. Guards against regression of the dispatch
+	// shape when new tiers are added.
+	yaml := strings.Replace(
+		k8sAssertionOnly,
+		"type: assertion_only",
+		"type: speculation",
+		1,
+	)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "tier_unsupported" {
+		t.Fatalf("expected tier_unsupported, got %q (reasons=%v)", res.Status, res.Reasons)
 	}
 	if !hasReason(res.Reasons, "tier_not_yet_implemented") {
 		t.Fatalf("expected tier_not_yet_implemented, got %v", res.Reasons)
