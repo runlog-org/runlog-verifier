@@ -138,6 +138,12 @@ func (sourceRemoveStrategy) apply(b branchBaseline, m Mutation) (map[string]any,
 // strategies is the single source of truth for which strategy names this
 // verifier slice supports. Adding a new strategy is a one-line registry edit
 // plus one apply method.
+//
+// Note: cassette-response mutations (mutate_cassette_response, F22) are
+// dispatched separately by the integration tier — they don't fit the
+// (inputs, action) -> (inputs, action) shape this strategy interface assumes.
+// They live in cassetteResponseStrategies below so the registry isn't lying
+// about supporting them at unit tier.
 var strategies = map[string]strategy{
 	"set_literal_value":  inputSubstStrategy{},
 	"mutate_fixture":     inputSubstStrategy{},
@@ -147,16 +153,41 @@ var strategies = map[string]strategy{
 	"drop_flag":          sourceRemoveStrategy{},
 }
 
-// sourceMutatingStrategies enumerates the strategies that rewrite the action
-// source rather than the inputs map. The non-discrimination diagnostic
-// (Bug 2 / mutation_did_not_discriminate) only fires for these — for input-
-// substitution strategies, an `unchanged` outcome is a different problem
-// (the new value happened to behave identically, not a tautological rename).
-var sourceMutatingStrategies = map[string]bool{
-	"swap_function_call": true,
-	"swap_identifier":    true,
-	"remove_kwarg":       true,
-	"drop_flag":          true,
+// cassetteResponseStrategies enumerates strategy names that perturb the
+// cassette before re-running the branch through a fresh stub. These are only
+// valid at integration tier — at unit tier they surface as
+// mutation_strategy_unsupported, which is the right error (no cassette exists
+// to perturb).
+var cassetteResponseStrategies = map[string]bool{
+	"mutate_cassette_response": true,
+}
+
+// isCassetteResponseStrategy reports whether the named strategy mutates the
+// cassette response rather than the action source / inputs. Exported within
+// the package for the integration-tier dispatcher.
+func isCassetteResponseStrategy(name string) bool {
+	return cassetteResponseStrategies[name]
+}
+
+// discriminatingStrategies enumerates the strategies whose `unchanged`
+// outcome under expected_result: fail signals a tautological / theatrical
+// test rather than a real submitter bug. The non-discrimination diagnostic
+// (mutation_did_not_discriminate) fires for these — for input-substitution
+// strategies, an `unchanged` outcome is a different problem (the new value
+// happened to behave identically, not a non-discriminating perturbation).
+//
+// Source-mutating strategies discriminate by rewriting the action source.
+// Cassette-response mutations discriminate by perturbing the upstream's
+// reply: if the action's matcher actually consults the response, perturbing
+// it must change behaviour; an `unchanged` outcome means the action ignored
+// the response field — exactly the integration-tier theatre this strategy
+// was added to kill.
+var discriminatingStrategies = map[string]bool{
+	"swap_function_call":       true,
+	"swap_identifier":          true,
+	"remove_kwarg":             true,
+	"drop_flag":                true,
+	"mutate_cassette_response": true,
 }
 
 // stepBodiesEqual returns true when two step slices have byte-identical
@@ -303,7 +334,7 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			// targeted hint so the seed author knows what to fix.
 			if expected == outcomeFail &&
 				actual == outcomeUnchanged &&
-				sourceMutatingStrategies[m.Strategy] &&
+				discriminatingStrategies[m.Strategy] &&
 				!stepBodiesEqual(baseline.Action, mutAction) {
 				token, _ := resolveSwapToken(m)
 				reasons = append(reasons, Reason{

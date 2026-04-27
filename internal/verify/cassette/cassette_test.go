@@ -294,6 +294,66 @@ func TestParseRequestStoresQueryFields(t *testing.T) {
 	}
 }
 
+func TestCassetteCloneIsolation(t *testing.T) {
+	// Clone must produce a deep copy: mutating the clone's response body /
+	// status / headers must not affect the original. Used by the F22
+	// cassette-response mutation framework so each mutation gets a fresh
+	// perturbed cassette without corrupting the per-branch baseline.
+	raw := map[string]any{
+		"mode": "replay",
+		"steps": map[string]any{
+			"a": map[string]any{
+				"request":  "GET /a\n\n",
+				"response": "200\nX-Test: original\n\nbody-original",
+			},
+		},
+	}
+	orig, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	clone := orig.Clone()
+
+	// Mutate the clone's body, status, header.
+	step := clone.Steps["a"]
+	step.Response.Body = "body-mutated"
+	step.Response.Status = 500
+	step.Response.Headers["X-Test"] = "mutated"
+	step.Response.Headers["X-New"] = "added"
+	clone.Steps["a"] = step
+
+	// Original step must still observe the parsed values.
+	o := orig.Steps["a"]
+	if o.Response.Body != "body-original" {
+		t.Errorf("orig.body=%q, want body-original (clone mutation leaked)", o.Response.Body)
+	}
+	if o.Response.Status != 200 {
+		t.Errorf("orig.status=%d, want 200 (clone mutation leaked)", o.Response.Status)
+	}
+	if o.Response.Headers["X-Test"] != "original" {
+		t.Errorf("orig.X-Test=%q, want original", o.Response.Headers["X-Test"])
+	}
+	if _, present := o.Response.Headers["X-New"]; present {
+		t.Errorf("orig.X-New leaked from clone")
+	}
+
+	// And the clone must observe the perturbations.
+	c := clone.Steps["a"]
+	if c.Response.Body != "body-mutated" {
+		t.Errorf("clone.body=%q, want body-mutated", c.Response.Body)
+	}
+	if c.Response.Status != 500 {
+		t.Errorf("clone.status=%d, want 500", c.Response.Status)
+	}
+}
+
+func TestCassetteCloneNil(t *testing.T) {
+	var c *Cassette
+	if got := c.Clone(); got != nil {
+		t.Errorf("nil.Clone() = %v, want nil", got)
+	}
+}
+
 func TestStubRemainingSequence(t *testing.T) {
 	raw := map[string]any{
 		"mode": "replay",

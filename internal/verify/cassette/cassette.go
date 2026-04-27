@@ -79,6 +79,53 @@ func (c *Cassette) StepNames() []string {
 	return out
 }
 
+// Clone returns a deep copy of the cassette. Used by the integration-tier
+// mutation framework so each cassette-response mutation perturbs an isolated
+// copy without corrupting the per-branch baseline that subsequent mutations
+// re-run against. Step values are copied by value; the per-step Headers maps
+// are cloned so callers can safely mutate the clone in place.
+func (c *Cassette) Clone() *Cassette {
+	if c == nil {
+		return nil
+	}
+	out := &Cassette{
+		Mode:      c.Mode,
+		Steps:     make(map[string]Step, len(c.Steps)),
+		stepNames: append([]string(nil), c.stepNames...),
+	}
+	for name, step := range c.Steps {
+		out.Steps[name] = Step{
+			Name:     step.Name,
+			Request:  cloneRequest(step.Request),
+			Response: cloneResponse(step.Response),
+		}
+	}
+	return out
+}
+
+func cloneRequest(r Request) Request {
+	out := r
+	out.Headers = cloneHeaderMap(r.Headers)
+	return out
+}
+
+func cloneResponse(r Response) Response {
+	out := r
+	out.Headers = cloneHeaderMap(r.Headers)
+	return out
+}
+
+func cloneHeaderMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 // Parse reads the verification.cassette map (already YAML-decoded) into a
 // Cassette. Returns errors for missing required fields or malformed step
 // strings.

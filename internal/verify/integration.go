@@ -82,6 +82,8 @@ package verify
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/runlog/verifier/internal/verify/cassette"
 	"github.com/runlog/verifier/internal/verify/runner"
@@ -450,18 +452,30 @@ func runMutationsWithCtx(e *Entry, b mutationBaseline, ctx integrationMutationCt
 
 // runOneIntegrationMutation mirrors runOneMutation but re-runs the mutated
 // branch through a fresh stub server so each mutation sees a clean cassette
-// cursor. The strategy.apply call still returns mutated inputs/action; we
-// rebind $ENDPOINT before handing them to the runner.
+// cursor. The strategy dispatcher splits two cases:
+//
+//   - input/source mutators (set_literal_value, mutate_fixture, swap_*,
+//     remove_kwarg, drop_flag): rewrite inputs or action source, then re-run
+//     against a fresh stub seeded from the un-mutated cassette baseline.
+//   - cassette-response mutators (mutate_cassette_response): leave inputs
+//     and action untouched, perturb a clone of the cassette, then re-run
+//     against a fresh stub seeded from the perturbed clone.
+//
+// Per-mutation cassette cloning is required so mutation N doesn't corrupt
+// mutation N+1's baseline — see cassette.Cassette.Clone.
 func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int, ctx integrationMutationCtx) ([]Reason, bool) {
-	strat, ok := strategies[m.Strategy]
-	if !ok {
-		return []Reason{{
-			Code: "mutation_strategy_unsupported",
-			Message: fmt.Sprintf(
-				"mutation #%d strategy %q is not yet implemented; supported in this build: %s",
-				idx+1, m.Strategy, supportedStrategiesMessage(),
-			),
-		}}, false
+	cassetteResponse := isCassetteResponseStrategy(m.Strategy)
+
+	if !cassetteResponse {
+		if _, ok := strategies[m.Strategy]; !ok {
+			return []Reason{{
+				Code: "mutation_strategy_unsupported",
+				Message: fmt.Sprintf(
+					"mutation #%d strategy %q is not yet implemented; supported in this build: %s",
+					idx+1, m.Strategy, supportedStrategiesMessage(),
+				),
+			}}, false
+		}
 	}
 
 	var reasons []Reason
@@ -510,17 +524,43 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 			continue
 		}
 
-		mutInputs, mutAction, err := strat.apply(baseline, m)
-		if err != nil {
-			reasons = append(reasons, Reason{
-				Code: "mutation_target_invalid",
-				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-					idx+1, m.Strategy, branch, err),
-			})
-			continue
+		// ── Per-mutation stub setup ───────────────────────────────────
+		// Cassette-response mutations clone + perturb the cassette before
+		// the stub is created; everything else uses the un-mutated baseline.
+		var mutInputs map[string]any
+		var mutAction []runner.Step
+		stubCassette := ctx.cassette
+
+		if cassetteResponse {
+			// Cassette-response: inputs and action are untouched; cassette
+			// is cloned + perturbed.
+			mutInputs = baseline.Inputs
+			mutAction = baseline.Action
+
+			perturbed, err := applyCassetteResponseMutation(ctx.cassette, m, seq)
+			if err != nil {
+				reasons = append(reasons, Reason{
+					Code:    err.code,
+					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v", idx+1, m.Strategy, branch, err.msg),
+				})
+				continue
+			}
+			stubCassette = perturbed
+		} else {
+			strat := strategies[m.Strategy]
+			var err error
+			mutInputs, mutAction, err = strat.apply(baseline, m)
+			if err != nil {
+				reasons = append(reasons, Reason{
+					Code: "mutation_target_invalid",
+					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
+						idx+1, m.Strategy, branch, err),
+				})
+				continue
+			}
 		}
 
-		stub := cassette.NewStub(ctx.cassette, seq)
+		stub := cassette.NewStub(stubCassette, seq)
 		mutInputs = withEndpoint(mutInputs, stub.URL())
 
 		got, err := runner.RunPython(baseline.Setup, mutAction, mutInputs, b.Timeout)
@@ -546,6 +586,23 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 
 		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
 		if actual != expected {
+			// F22: mirror the F21 hint for cassette-response mutations.
+			// A perturbed cassette that produces no behavioural change is
+			// integration-tier theatre — the action ignored the response
+			// field the submitter perturbed.
+			if cassetteResponse &&
+				expected == outcomeFail &&
+				actual == outcomeUnchanged {
+				reasons = append(reasons, Reason{
+					Code: "mutation_did_not_discriminate",
+					Message: fmt.Sprintf(
+						"mutation #%d (%s) on %s: perturbed cassette response (target=%q field=%s) but produced no behavioural change. "+
+							"The action did not consult the perturbed response field — pick a field the action actually reads, "+
+							"or assert expected_result: unchanged if this tolerance is the claim.",
+						idx+1, m.Strategy, branch, m.Target, mutationField(m)),
+				})
+				continue
+			}
 			reasons = append(reasons, Reason{
 				Code: "mutation_outcome_mismatch",
 				Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
@@ -554,4 +611,181 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 		}
 	}
 	return reasons, true
+}
+
+// cassetteMutationError pairs a typed reason code with a human-readable
+// message. The cassette-response mutator surfaces several distinct failure
+// modes (unknown step ID, unparseable target, invalid field, malformed
+// new_value, malformed status) — distinguishing them at the reason level
+// gives seed authors a precise diagnostic.
+type cassetteMutationError struct {
+	code string
+	msg  string
+}
+
+func (e *cassetteMutationError) Error() string { return e.msg }
+
+func newCassetteMutationError(code, msg string) *cassetteMutationError {
+	return &cassetteMutationError{code: code, msg: msg}
+}
+
+// applyCassetteResponseMutation clones the cassette and perturbs the response
+// declared by the mutation's target step. Returns a new *cassette.Cassette;
+// the input is not modified.
+//
+// Mutation shape:
+//
+//	strategy: mutate_cassette_response
+//	target:   <step_id>          # references a key in cassette.steps
+//	field:    body | status | header.<NAME>   # carried in m.Action (see
+//	                                            mutationField below)
+//	new_value: <replacement>     # string for body/header.*; int|string for status
+//	branch:   failed_approach | working_approach   # required (cassette
+//	                                                   responses are per-branch
+//	                                                   in the v0.1 wire shape)
+//
+// The Mutation struct carries `field` in the existing `action` slot —
+// reusing the slot rather than expanding the wire shape keeps the
+// schema delta to one line. mutationField below is the canonical
+// extractor.
+//
+// Validation:
+//   - target must name a declared cassette step, AND that step must appear in
+//     the targeted branch's replay sequence (else the perturbation is dead
+//     weight).
+//   - field must be body, status, or header.<NAME>.
+//   - new_value type must match the field: string for body/header.*, int or
+//     numeric string for status.
+func applyCassetteResponseMutation(c *cassette.Cassette, m Mutation, branchSeq []string) (*cassette.Cassette, *cassetteMutationError) {
+	stepID := strings.TrimSpace(m.Target)
+	if stepID == "" {
+		return nil, newCassetteMutationError("mutation_target_invalid",
+			"mutate_cassette_response requires target: <cassette_step_id>")
+	}
+
+	step, ok := c.Steps[stepID]
+	if !ok {
+		return nil, newCassetteMutationError("mutation_step_id_unknown", fmt.Sprintf(
+			"target %q does not name any declared cassette step (declared: %v)",
+			stepID, c.StepNames()))
+	}
+
+	// Belt-and-braces: the targeted branch must actually consume this step,
+	// else the perturbation is unobservable and the mutation can't possibly
+	// discriminate. Surface as step_id_unknown with a more precise message
+	// rather than letting the run silently produce an `unchanged` outcome.
+	consumed := false
+	for _, name := range branchSeq {
+		if name == stepID {
+			consumed = true
+			break
+		}
+	}
+	if !consumed {
+		return nil, newCassetteMutationError("mutation_step_id_unknown", fmt.Sprintf(
+			"target %q is declared but the targeted branch's replay sequence %v does not consume it — "+
+				"the perturbation would be unobservable",
+			stepID, branchSeq))
+	}
+
+	field := mutationField(m)
+	if field == "" {
+		return nil, newCassetteMutationError("mutation_field_invalid",
+			"mutate_cassette_response requires field: body | status | header.<NAME> "+
+				"(carried in the mutation's `action` field)")
+	}
+
+	clone := c.Clone()
+	target := clone.Steps[stepID]
+
+	switch {
+	case field == "body":
+		newBody, err := stringNewValue(m.NewValue)
+		if err != nil {
+			return nil, newCassetteMutationError("mutation_target_invalid", err.Error())
+		}
+		target.Response.Body = newBody
+
+	case field == "status":
+		newStatus, err := statusNewValue(m.NewValue)
+		if err != nil {
+			return nil, newCassetteMutationError("mutation_target_invalid", err.Error())
+		}
+		target.Response.Status = newStatus
+
+	case strings.HasPrefix(field, "header."):
+		hdrName := strings.TrimPrefix(field, "header.")
+		if hdrName == "" {
+			return nil, newCassetteMutationError("mutation_field_invalid",
+				"field header. requires a header name (e.g. header.Retry-After)")
+		}
+		newVal, err := stringNewValue(m.NewValue)
+		if err != nil {
+			return nil, newCassetteMutationError("mutation_target_invalid", err.Error())
+		}
+		if target.Response.Headers == nil {
+			target.Response.Headers = make(map[string]string, 1)
+		}
+		target.Response.Headers[hdrName] = newVal
+
+	default:
+		return nil, newCassetteMutationError("mutation_field_invalid", fmt.Sprintf(
+			"unsupported field %q — supported: body, status, header.<NAME>", field))
+	}
+
+	// Step is a value type — the clone-then-mutate pattern requires re-storing.
+	// Preserve the step Name so downstream diagnostics still reference the
+	// original key.
+	step.Response = target.Response
+	clone.Steps[stepID] = step
+	return clone, nil
+}
+
+// mutationField extracts the cassette-response mutation's field selector. The
+// wire shape carries it in the existing `action` slot (Mutation.Action) so the
+// schema delta is just a one-line strategy enum addition. Whitespace is
+// trimmed; an empty result means the submitter didn't declare a field.
+func mutationField(m Mutation) string {
+	return strings.TrimSpace(m.Action)
+}
+
+// stringNewValue coerces m.NewValue into a string for body / header
+// perturbations. yaml.v3 may decode numeric / boolean / nil literals into
+// the matching Go types; we accept any of those as long as a stable string
+// rendering exists.
+func stringNewValue(v any) (string, error) {
+	switch val := v.(type) {
+	case string:
+		return val, nil
+	case []byte:
+		return string(val), nil
+	case bool, int, int64, float64:
+		return fmt.Sprintf("%v", val), nil
+	case nil:
+		return "", nil
+	}
+	return "", fmt.Errorf("new_value must be a string for body / header.* perturbations, got %T", v)
+}
+
+// statusNewValue coerces m.NewValue into an HTTP status code. Accepts
+// numeric YAML scalars (200) and numeric strings ("200") for symmetry with
+// the rest of the verifier's loose type acceptance.
+func statusNewValue(v any) (int, error) {
+	switch val := v.(type) {
+	case int:
+		return val, nil
+	case int64:
+		return int(val), nil
+	case float64:
+		// yaml.v3 decodes integer scalars as int when small; this path
+		// catches the rare big-integer / float case.
+		return int(val), nil
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil {
+			return 0, fmt.Errorf("new_value for status must be a numeric HTTP status, got %q", val)
+		}
+		return n, nil
+	}
+	return 0, fmt.Errorf("new_value for status must be an integer (e.g. 500) or numeric string, got %T", v)
 }

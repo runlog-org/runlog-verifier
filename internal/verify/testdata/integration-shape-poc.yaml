@@ -126,6 +126,19 @@ verification:
       new_value: "((lambda *_: [0]))"
       branch: working_approach
       expected_result: fail
+    # F22: cassette-response mutation. Perturbing the success step's status
+    # from 200 → 500 forces the working branch to retry past its 2-attempt
+    # bound and surface a 5xx as the final result — the value_equals: 200
+    # spec rejects, hence outcome: fail. This proves the action actually
+    # consults resp.status; before F22 the verifier could not falsify a
+    # cassette-blind action that hardcoded {"status": 200} regardless of
+    # the upstream reply.
+    - strategy: mutate_cassette_response
+      target: charges-200
+      action: status
+      new_value: 500
+      branch: working_approach
+      expected_result: fail
   timeout_seconds: 10
 literals:
   $LITERAL_NOOP:
