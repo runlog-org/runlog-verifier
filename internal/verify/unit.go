@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/runlog/verifier/internal/verify/runner"
+	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
 // schemaIsolations is the full enum from schema/entry.schema.yaml's

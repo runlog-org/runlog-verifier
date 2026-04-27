@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/runlog/verifier/internal/verify/runner"
+	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
 // stepsFromAny normalizes the schema's `setup` (always array) and

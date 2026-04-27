@@ -1,4 +1,4 @@
-module github.com/runlog/verifier
+module github.com/runlog-org/runlog-verifier
 
 go 1.22
 

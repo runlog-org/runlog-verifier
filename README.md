@@ -1,8 +1,8 @@
-# verifier/ — Signed Verification Agent
+# Runlog Verifier — Signed Verification Agent
 
-**Future repo:** `runlog-verifier` — public, Apache-2.0 (planned)
+**Repo:** [`runlog-org/runlog-verifier`](https://github.com/runlog-org/runlog-verifier) — public, Apache-2.0
 **Language:** Go
-**Implements:** [`../docs/03-verification-and-provenance.md`](../docs/03-verification-and-provenance.md)
+**Implements:** [`runlog-docs/03-verification-and-provenance.md`](https://github.com/runlog-org/runlog-docs/blob/main/03-verification-and-provenance.md)
 
 Tamper-evident, reproducible-build binary distributed via package managers (`brew install runlog-verifier`, apt). Wraps test execution on the submitter's machine, runs both branches (§5.3), applies mutation testing, records integration cassettes (§7.5), and signs the bundle before submission. Target size: ~200 lines, fully auditable.
 
@@ -24,8 +24,8 @@ Tamper-evident, reproducible-build binary distributed via package managers (`bre
 
 ## Depends on
 
-- `../schema/` — pinned Go module version
-- `../vocabularies/` — pinned data version
+- [`runlog-org/runlog-schema`](https://github.com/runlog-org/runlog-schema) — pinned Go module version
+- [`runlog-org/runlog-vocabularies`](https://github.com/runlog-org/runlog-vocabularies) — pinned data version
 
 ## Build properties
 
@@ -36,14 +36,13 @@ Tamper-evident, reproducible-build binary distributed via package managers (`bre
 
 First-time setup on a fresh machine:
 
-    cd verifier/
     go mod tidy        # writes go.sum
     make build         # writes bin/runlog-verifier
     make test          # roundtrip + fingerprint coverage
 
 Reproducible-build flags (`-trimpath -buildvcs=false`) are wired into
 the Makefile and validated on every push by
-[`.github/workflows/verifier.yml`](../.github/workflows/verifier.yml) —
+[`.github/workflows/verifier.yml`](./.github/workflows/verifier.yml) —
 two consecutive builds must hash identically or CI fails. Signed-release
 publishing of tagged binaries is deferred to the first Phase 2 release.
 

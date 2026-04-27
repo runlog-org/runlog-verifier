@@ -58,8 +58,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/runlog/verifier/internal/verify/cassette"
-	"github.com/runlog/verifier/internal/verify/runner"
+	"github.com/runlog-org/runlog-verifier/internal/verify/cassette"
+	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
 // reexecuteSupportedTools enumerates the cassette.runtime.tool values this

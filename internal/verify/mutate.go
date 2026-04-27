@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/runlog/verifier/internal/verify/runner"
+	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
 // branchKind enumerates which branch a mutation targets. Stringly-typed

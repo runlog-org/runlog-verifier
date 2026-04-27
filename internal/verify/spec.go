@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/runlog/verifier/internal/verify/runner"
+	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
 // matchOutcome compares one branch's ExecResult against the relevant

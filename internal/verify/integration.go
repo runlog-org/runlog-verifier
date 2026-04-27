@@ -85,8 +85,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/runlog/verifier/internal/verify/cassette"
-	"github.com/runlog/verifier/internal/verify/runner"
+	"github.com/runlog-org/runlog-verifier/internal/verify/cassette"
+	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
 // isEnvErr reports whether err is an environmental failure (timeout, missing

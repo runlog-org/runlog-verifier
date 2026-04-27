@@ -12,10 +12,21 @@ import (
 // TestRegisteredPrimitivesMatchesSchema fails CI if registeredPrimitives and
 // the schema enum at
 // properties.verification.properties.primitives_required.items.enum diverge.
+//
+// The schema lives in a sibling repo (runlog-org/runlog-schema). Set
+// RUNLOG_SCHEMA_PATH to point at entry.schema.yaml; default assumes a
+// sibling clone at ../../../../runlog-schema/. Skips when not found so a
+// standalone verifier checkout can still run the rest of the suite.
 func TestRegisteredPrimitivesMatchesSchema(t *testing.T) {
-	schemaPath := filepath.Join("..", "..", "..", "schema", "entry.schema.yaml")
+	schemaPath := os.Getenv("RUNLOG_SCHEMA_PATH")
+	if schemaPath == "" {
+		schemaPath = filepath.Join("..", "..", "..", "runlog-schema", "entry.schema.yaml")
+	}
 	data, err := os.ReadFile(schemaPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skipf("schema not found at %s; clone runlog-org/runlog-schema as a sibling or set RUNLOG_SCHEMA_PATH", schemaPath)
+		}
 		t.Fatalf("read schema: %v", err)
 	}
 

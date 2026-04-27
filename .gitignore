@@ -1,1 +1,20 @@
+# ── OS / editor ──
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Go ──
 bin/
+*.exe
+*.test
+*.out
+vendor/
+
+# ── Local config ──
+.env
+.env.*
+*.pem
+*.key

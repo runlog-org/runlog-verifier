@@ -25,9 +25,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/runlog/verifier/internal/fingerprint"
-	"github.com/runlog/verifier/internal/sign"
-	"github.com/runlog/verifier/internal/verify"
+	"github.com/runlog-org/runlog-verifier/internal/fingerprint"
+	"github.com/runlog-org/runlog-verifier/internal/sign"
+	"github.com/runlog-org/runlog-verifier/internal/verify"
 )
 
 // Version and Commit are injected at build time via -ldflags.
