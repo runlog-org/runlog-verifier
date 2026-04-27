@@ -4,7 +4,7 @@
 
 **Repo:** [`runlog-org/runlog-verifier`](https://github.com/runlog-org/runlog-verifier) — public, Apache-2.0
 **Language:** Go
-**Implements:** [`runlog-docs/03-verification-and-provenance.md`](https://github.com/runlog-org/runlog-docs/blob/main/03-verification-and-provenance.md)
+**Role:** signed verification agent — runs both branches of an entry locally, applies mutation testing, and signs a tamper-evident bundle. The verification model is summarised at [runlog.org/why-verification/](https://runlog.org/why-verification/).
 
 Tamper-evident, reproducible-build binary distributed via package managers (`brew install runlog-verifier`, apt). Wraps test execution on the submitter's machine, runs both branches (§5.3), applies mutation testing, records integration cassettes (§7.5), and signs the bundle before submission. Target size: ~200 lines, fully auditable.
 
