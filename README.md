@@ -1,5 +1,7 @@
 # Runlog Verifier — Signed Verification Agent
 
+> Part of the **[Runlog](https://github.com/runlog-org)** project — see the [project home](https://github.com/runlog-org) for the overview.
+
 **Repo:** [`runlog-org/runlog-verifier`](https://github.com/runlog-org/runlog-verifier) — public, Apache-2.0
 **Language:** Go
 **Implements:** [`runlog-docs/03-verification-and-provenance.md`](https://github.com/runlog-org/runlog-docs/blob/main/03-verification-and-provenance.md)
