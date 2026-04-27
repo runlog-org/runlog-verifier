@@ -8,17 +8,25 @@
 // each step's request and response fields to strings. This package decodes
 // them as a minimal HTTP wire format:
 //
-//	request:  "METHOD /path\nHeader: Value\n\nbody"
+//	request:  "METHOD /path[?query]\nHeader: Value\n\nbody"
 //	response: "STATUS\nHeader: Value\n\nbody"
 //
-// Matching is method+path only in v0.1. Header equality, body schema, and
-// query-parameter matching are deliberately out of scope — adding them later
-// is a per-step extension that won't break existing fixtures.
+// Matching is method + path (+ optional query) in v0.1. Header equality and
+// body schema are deliberately out of scope — adding them later is a per-step
+// extension that won't break existing fixtures.
+//
+// Query-string matching is asymmetric: a step that declares no query (e.g.
+// "GET /search") matches an incoming request regardless of its query string,
+// preserving the v0.1 method+path-only behavior. A step that declares a query
+// (e.g. "GET /search?q=foo") enforces an exact-equivalence match — the
+// incoming request must produce the same canonical form via url.Values.Encode
+// (so "?a=1&b=2" matches "?b=2&a=1").
 package cassette
 
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,11 +49,19 @@ type Step struct {
 }
 
 // Request is the matcher for one cassette step's expected incoming request.
+//
+// Path holds only the URL path (no query). RawPath preserves the original
+// declared "/path[?query]" string for diagnostics. HasQuery is true when the
+// declared path contained a "?" — when true, Query holds the canonical
+// url.Values.Encode form to compare against incoming requests.
 type Request struct {
-	Method  string
-	Path    string
-	Headers map[string]string
-	Body    string
+	Method   string
+	Path     string
+	RawPath  string
+	HasQuery bool
+	Query    string
+	Headers  map[string]string
+	Body     string
 }
 
 // Response is the canned reply for one cassette step.
@@ -139,21 +155,44 @@ func parseRequest(s string) (Request, error) {
 			"first line must be \"METHOD /path\", got %q", startLine)
 	}
 	method := strings.TrimSpace(parts[0])
-	path := strings.TrimSpace(parts[1])
-	if method == "" || path == "" {
+	rawPath := strings.TrimSpace(parts[1])
+	if method == "" || rawPath == "" {
 		return Request{}, fmt.Errorf(
 			"method and path must both be non-empty, got method=%q path=%q",
-			method, path)
+			method, rawPath)
 	}
 	hdrMap, err := headersFromLines(headers)
 	if err != nil {
 		return Request{}, err
 	}
+
+	// Split off an optional query string. If the declared path contains "?",
+	// the query is parsed and re-encoded into canonical form so callers can
+	// compare key-order-independent against the incoming request's canonical
+	// query. A declared path with no "?" matches any incoming query —
+	// preserving the v0.1 method+path-only semantics.
+	pathOnly := rawPath
+	queryStr := ""
+	hasQuery := false
+	if i := strings.Index(rawPath, "?"); i >= 0 {
+		hasQuery = true
+		pathOnly = rawPath[:i]
+		q, err := url.ParseQuery(rawPath[i+1:])
+		if err != nil {
+			return Request{}, fmt.Errorf(
+				"malformed query string in %q: %w", rawPath, err)
+		}
+		queryStr = q.Encode()
+	}
+
 	return Request{
-		Method:  strings.ToUpper(method),
-		Path:    path,
-		Headers: hdrMap,
-		Body:    body,
+		Method:   strings.ToUpper(method),
+		Path:     pathOnly,
+		RawPath:  rawPath,
+		HasQuery: hasQuery,
+		Query:    queryStr,
+		Headers:  hdrMap,
+		Body:     body,
 	}, nil
 }
 

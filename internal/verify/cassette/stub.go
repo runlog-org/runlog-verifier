@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 )
 
@@ -135,7 +136,7 @@ func (s *Stub) serve(w http.ResponseWriter, r *http.Request) {
 			Path:           pathWithQuery(r),
 			ExpectedStep:   step.Name,
 			ExpectedMethod: step.Request.Method,
-			ExpectedPath:   step.Request.Path,
+			ExpectedPath:   expectedPathFor(step.Request),
 		})
 		// Still advance the cursor so a later request lining up with a later
 		// step has a chance to match; the unmatched list captures the drift.
@@ -156,8 +157,12 @@ func (s *Stub) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // matchRequest compares an incoming http.Request against a cassette Request.
-// v0.1 matches on method + path only — header / body matching is left for a
-// follow-up slice.
+// v0.1 matches on method + path (+ optional query) — header / body matching
+// is left for a follow-up slice.
+//
+// Query semantics are asymmetric: a spec with no declared query matches any
+// incoming query string; a spec that declares a query enforces canonical
+// equivalence (url.Values.Encode form) so key order is irrelevant.
 func matchRequest(spec Request, r *http.Request) bool {
 	if !pathsMatch(spec.Path, r.URL.Path) {
 		return false
@@ -165,16 +170,33 @@ func matchRequest(spec Request, r *http.Request) bool {
 	if spec.Method != "" && spec.Method != r.Method {
 		return false
 	}
+	if spec.HasQuery && !queriesMatch(spec.Query, r.URL.RawQuery) {
+		return false
+	}
 	return true
 }
 
 // pathsMatch compares the cassette path against the request path. Both are
 // stripped of trailing slashes (idempotent treatment of "/foo" and "/foo/")
-// before comparison; query strings on the cassette side are not yet matched.
+// before comparison.
 func pathsMatch(spec, got string) bool {
 	// Cassette path may include a leading "/", a trailing "/", or neither.
 	// Normalize both sides.
 	return trimSlash(spec) == trimSlash(got)
+}
+
+// queriesMatch compares a cassette spec's already-canonical query (produced
+// at parse time via url.Values.Encode) against the incoming request's raw
+// query, which is canonicalized the same way before comparison so key order
+// and percent-encoding differences don't cause false negatives.
+func queriesMatch(specCanonical, gotRaw string) bool {
+	got, err := url.ParseQuery(gotRaw)
+	if err != nil {
+		// Malformed incoming query — fail closed so the unmatched diagnostic
+		// surfaces rather than silently passing.
+		return false
+	}
+	return specCanonical == got.Encode()
 }
 
 func trimSlash(p string) string {
@@ -191,4 +213,14 @@ func pathWithQuery(r *http.Request) string {
 		return r.URL.Path
 	}
 	return r.URL.Path + "?" + r.URL.RawQuery
+}
+
+// expectedPathFor renders a cassette Request's path for unmatched-request
+// diagnostics: includes the declared query string when one was present so
+// the operator sees the full declared form.
+func expectedPathFor(spec Request) string {
+	if spec.RawPath != "" {
+		return spec.RawPath
+	}
+	return spec.Path
 }

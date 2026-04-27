@@ -194,6 +194,106 @@ func TestStubSequenceExhausted(t *testing.T) {
 	}
 }
 
+// queryStub is a tiny helper: build a one-step cassette with the given
+// declared request line and verify whether an incoming GET against `reqURL`
+// matches or lands in UnmatchedRequests.
+func queryStub(t *testing.T, declaredRequest, reqPath string) (matched bool) {
+	t.Helper()
+	raw := map[string]any{
+		"mode": "replay",
+		"steps": map[string]any{
+			"only": map[string]any{
+				"request":  declaredRequest,
+				"response": "200\n\nok",
+			},
+		},
+	}
+	c, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", declaredRequest, err)
+	}
+	stub := NewStub(c, []string{"only"})
+	defer stub.Close()
+
+	resp, err := http.Get(stub.URL() + reqPath)
+	if err != nil {
+		t.Fatalf("http.Get(%q): %v", reqPath, err)
+	}
+	resp.Body.Close()
+
+	return len(stub.UnmatchedRequests()) == 0 && resp.StatusCode == 200
+}
+
+func TestStubQueryMatchingNoQueryDeclared(t *testing.T) {
+	// Declared "/foo" matches "/foo" — existing behavior, must not regress.
+	if !queryStub(t, "GET /foo\n\n", "/foo") {
+		t.Fatalf("expected match for declared /foo against /foo")
+	}
+	// Declared "/foo" matches "/foo?bar=1" — backward-compat for migrated seeds.
+	if !queryStub(t, "GET /foo\n\n", "/foo?bar=1") {
+		t.Fatalf("expected match for declared /foo against /foo?bar=1 (no-query cassette ignores query)")
+	}
+}
+
+func TestStubQueryMatchingDeclaredQueryExact(t *testing.T) {
+	// Declared "/foo?bar=1" matches "/foo?bar=1".
+	if !queryStub(t, "GET /foo?bar=1\n\n", "/foo?bar=1") {
+		t.Fatalf("expected match for declared /foo?bar=1 against /foo?bar=1")
+	}
+}
+
+func TestStubQueryMatchingDeclaredQueryDifferentValue(t *testing.T) {
+	// Declared "/foo?bar=1" must NOT match "/foo?bar=2".
+	if queryStub(t, "GET /foo?bar=1\n\n", "/foo?bar=2") {
+		t.Fatalf("expected mismatch for /foo?bar=1 vs /foo?bar=2")
+	}
+}
+
+func TestStubQueryMatchingDeclaredQueryAbsentInRequest(t *testing.T) {
+	// Declared "/foo?bar=1" must NOT match "/foo" (request has no query).
+	if queryStub(t, "GET /foo?bar=1\n\n", "/foo") {
+		t.Fatalf("expected mismatch for /foo?bar=1 vs /foo (no query)")
+	}
+}
+
+func TestStubQueryMatchingCanonicalEquivalence(t *testing.T) {
+	// Declared "/foo?a=1&b=2" must match "/foo?b=2&a=1" (key order irrelevant
+	// after url.Values.Encode canonicalization).
+	if !queryStub(t, "GET /foo?a=1&b=2\n\n", "/foo?b=2&a=1") {
+		t.Fatalf("expected match across reordered query keys")
+	}
+}
+
+func TestParseRequestStoresQueryFields(t *testing.T) {
+	raw := map[string]any{
+		"mode": "replay",
+		"steps": map[string]any{
+			"only": map[string]any{
+				"request":  "GET /search?q=foo&page=2\n\n",
+				"response": "200\n\n",
+			},
+		},
+	}
+	c, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	step := c.Steps["only"]
+	if step.Request.Path != "/search" {
+		t.Fatalf("Path=%q, want /search", step.Request.Path)
+	}
+	if !step.Request.HasQuery {
+		t.Fatalf("HasQuery=false, want true")
+	}
+	if step.Request.RawPath != "/search?q=foo&page=2" {
+		t.Fatalf("RawPath=%q", step.Request.RawPath)
+	}
+	// Query must be canonical (sorted by key).
+	if step.Request.Query != "page=2&q=foo" {
+		t.Fatalf("Query=%q, want canonical page=2&q=foo", step.Request.Query)
+	}
+}
+
 func TestStubRemainingSequence(t *testing.T) {
 	raw := map[string]any{
 		"mode": "replay",
