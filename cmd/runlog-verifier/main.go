@@ -10,6 +10,7 @@
 //
 // Usage:
 //
+//	runlog-verifier register --email <addr>
 //	runlog-verifier verify <entry.yaml>
 //	runlog-verifier --version
 //	runlog-verifier version
@@ -21,11 +22,13 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 
 	"github.com/runlog-org/runlog-verifier/internal/fingerprint"
+	"github.com/runlog-org/runlog-verifier/internal/keystore"
 	"github.com/runlog-org/runlog-verifier/internal/sign"
 	"github.com/runlog-org/runlog-verifier/internal/verify"
 )
@@ -56,6 +59,8 @@ func main() {
 	}
 
 	switch args[0] {
+	case "register":
+		os.Exit(runRegister(args[1:], os.Stdout, os.Stderr))
 	case "verify":
 		os.Exit(runVerify(args[1:]))
 	case "keygen":
@@ -74,6 +79,13 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `runlog-verifier — Runlog signed verification agent
 
 Usage:
+  runlog-verifier register --email <addr> [--force] [--server <url>]
+        Generate (or load) a persistent Ed25519 keypair at ~/.runlog/key
+        and register the public key with the Runlog server. Required once
+        before `+"`verify`"+` can produce server-acceptable bundles.
+        Reads RUNLOG_API_KEY from the environment; --server overrides
+        RUNLOG_API_URL (default: https://api.runlog.org).
+
   runlog-verifier verify <entry.yaml>
         Run declarative verification on an assertion_only entry, capture the
         host fingerprint, sign a canonical-JSON bundle, and emit JSON to
@@ -82,7 +94,8 @@ Usage:
 
   runlog-verifier keygen
         Generate a fresh Ed25519 keypair and emit JSON to stdout.
-        DEV ONLY — production keys are embedded in reproducible-build releases.
+        DEV ONLY — does NOT touch the persistent keystore at ~/.runlog/key.
+        Use `+"`register`"+` for the production flow.
 
   runlog-verifier version
   runlog-verifier --version
@@ -101,8 +114,8 @@ func printVersion() {
 // Returns an exit code:
 //
 //	0 — entry verified
-//	1 — user error (bad args, unreadable file, malformed YAML)
-//	2 — internal error (keygen / signing failure)
+//	1 — user error (bad args, unreadable file, malformed YAML, missing key)
+//	2 — internal error (key load / signing failure)
 //	3 — entry rejected (one or more declarative checks failed)
 //	4 — verification tier not yet implemented in this build
 func runVerify(args []string) int {
@@ -154,10 +167,18 @@ func runVerify(args []string) int {
 		fpMap["git_dirty"] = "false"
 	}
 
-	// Generate a per-run keypair (key embedding deferred to Phase 2 CI).
-	_, priv, err := sign.GenerateKeypair()
+	// Load the persistent keypair registered with the server. Refuse to
+	// fall back to an ephemeral key — the server-side signature check
+	// would silently fail in a way that's hard to diagnose.
+	priv, _, err := keystore.Load()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "verify: keygen: %v\n", err)
+		if errors.Is(err, keystore.ErrNotFound) {
+			fmt.Fprintln(os.Stderr,
+				"verify: no registration key found. "+
+					"Run 'runlog-verifier register --email <addr>' first.")
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "verify: load key: %v\n", err)
 		return 2
 	}
 
@@ -208,13 +229,14 @@ func runVerify(args []string) int {
 }
 
 // runKeygen implements the `keygen` subcommand.
-// DEV ONLY — production keys are embedded in reproducible-build releases.
+// DEV ONLY — does NOT touch the persistent keystore. Production flow is
+// `register`, which writes ~/.runlog/key and uploads the pubkey.
 // Returns an exit code.
 func runKeygen(args []string) int {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: runlog-verifier keygen")
-		fmt.Fprintln(os.Stderr, "       DEV ONLY — production keys are embedded in reproducible-build releases.")
+		fmt.Fprintln(os.Stderr, "       DEV ONLY — does not touch ~/.runlog/key. Use `register` for production.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -229,7 +251,7 @@ func runKeygen(args []string) int {
 	out := map[string]string{
 		"public_key_b64":  base64.StdEncoding.EncodeToString(pub),
 		"private_key_b64": base64.StdEncoding.EncodeToString(priv),
-		"note":            "DEV ONLY — production keys are embedded in reproducible-build releases.",
+		"note":            "DEV ONLY — does not touch ~/.runlog/key. Use `register` for production.",
 	}
 
 	enc := json.NewEncoder(os.Stdout)
