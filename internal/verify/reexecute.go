@@ -122,30 +122,19 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 		return res
 	}
 
-	// ── Branch step shape ─────────────────────────────────────────────
-	failedSetup, err := stepsFromAny(e.FailedApproach.Setup)
-	if err != nil {
-		return rejected(res, "malformed_failed_setup", err.Error())
+	// ── Branch step shape + inputs ────────────────────────────────────
+	// reexecute mode skips path-extract appending: setup/action steps run as
+	// shell or sql, and the captured $RESULT is stdout (already a string), so
+	// dotted-key dict path extraction does not apply.
+	prep, prepReason := prepareBranches(e, false)
+	if prepReason != nil {
+		res.Status = "rejected"
+		res.Reasons = []Reason{*prepReason}
+		return res
 	}
-	failedAction, err := stepsFromAny(e.FailedApproach.Action)
-	if err != nil {
-		return rejected(res, "malformed_failed_action", err.Error())
-	}
-	workingSetup, err := stepsFromAny(e.WorkingApproach.Setup)
-	if err != nil {
-		return rejected(res, "malformed_working_setup", err.Error())
-	}
-	workingAction, err := stepsFromAny(e.WorkingApproach.Action)
-	if err != nil {
-		return rejected(res, "malformed_working_action", err.Error())
-	}
-
-	failedInputs, workingInputs, err := splitInputs(e.Verification.Differential)
-	if err != nil {
-		return rejected(res, "malformed_inputs", err.Error())
-	}
-	failedInputs = mergeLiterals(e.Literals, failedInputs)
-	workingInputs = mergeLiterals(e.Literals, workingInputs)
+	failedSetup, failedAction := prep.FailedSetup, prep.FailedAction
+	workingSetup, workingAction := prep.WorkingSetup, prep.WorkingAction
+	failedInputs, workingInputs := prep.FailedInputs, prep.WorkingInputs
 
 	timeout := e.Verification.TimeoutSeconds
 
@@ -290,19 +279,12 @@ func cleanupReexecuteSandbox(driver runner.SubprocessDriver, cas *cassette.Casse
 // sandbox and verifies the outcome matches the declared expectation. Cassette-
 // response mutations (mutate_cassette_response) are unsupported at reexecute
 // tier — they surface as mutation_strategy_unsupported so authors don't mix
-// them into a non-HTTP cassette.
+// them into a non-HTTP cassette. The shared aggregation loop lives in
+// iterateMutations (mutate.go); this wrapper just closes over cas.
 func runReexecuteMutations(e *Entry, b mutationBaseline, cas *cassette.Cassette) ([]Reason, bool) {
-	var reasons []Reason
-	supported := true
-
-	for i, m := range e.Verification.Mutations {
-		mr, ok := runOneReexecuteMutation(e, b, m, i, cas)
-		if !ok {
-			supported = false
-		}
-		reasons = append(reasons, mr...)
-	}
-	return reasons, supported
+	return iterateMutations(e, func(m Mutation, i int) ([]Reason, bool) {
+		return runOneReexecuteMutation(e, b, m, i, cas)
+	})
 }
 
 // runOneReexecuteMutation mirrors runOneIntegrationMutation but allocates a
@@ -368,57 +350,63 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 		}
 
 		// ── Per-mutation fresh sandbox ────────────────────────────────
-		got, mutDriver, runReason := runReexecuteBranch(
-			fmt.Sprintf("mutation #%d (%s) on %s", idx+1, m.Strategy, branch),
-			cas, baseline.Setup, mutAction, mutInputs, b.Timeout)
-		// Always tear down + remove, even on the runReason path.
-		defer cleanupReexecuteSandbox(mutDriver, cas, mutInputs, b.Timeout)
+		// Wrap the run + classify in a closure so the per-iteration cleanup
+		// (cassette teardown_script + os.RemoveAll) runs deterministically at
+		// the end of *this* mutation. A function-scope `defer` would
+		// accumulate across iterations and keep N tmpdirs + teardown_script
+		// processes live until the whole mutation loop returned.
+		mutReasons := func() []Reason {
+			got, mutDriver, runReason := runReexecuteBranch(
+				fmt.Sprintf("mutation #%d (%s) on %s", idx+1, m.Strategy, branch),
+				cas, baseline.Setup, mutAction, mutInputs, b.Timeout)
+			defer cleanupReexecuteSandbox(mutDriver, cas, mutInputs, b.Timeout)
 
-		if runReason != nil {
-			// Environmental failures (timeout, missing tool) stay as-is;
-			// in-band step crashes have already been folded into the
-			// ExecResult.Raised path by the driver and won't reach here.
-			if runReason.Code == "branch_timeout" || runReason.Code == "runtime_unavailable" {
-				reasons = append(reasons, Reason{
-					Code:    "mutation_runner_error",
-					Message: runReason.Message,
-				})
-				continue
+			if runReason != nil {
+				// Environmental failures (timeout, missing tool) stay as-is;
+				// in-band step crashes have already been folded into the
+				// ExecResult.Raised path by the driver and won't reach here.
+				if runReason.Code == "branch_timeout" || runReason.Code == "runtime_unavailable" {
+					return []Reason{{
+						Code:    "mutation_runner_error",
+						Message: runReason.Message,
+					}}
+				}
+				// setup_script_failed under a mutation: synthesize a raised
+				// ExecResult so the outcome classifier produces outcomeFail.
+				// The setup script is part of the test surface — if a mutation
+				// breaks it, that's a real fail, not a runner error.
+				got = runner.ExecResult{
+					Raised:    true,
+					Exception: "SubprocessError",
+					Message:   runReason.Message,
+				}
 			}
-			// setup_script_failed under a mutation: synthesize a raised
-			// ExecResult so the outcome classifier produces outcomeFail.
-			// The setup script is part of the test surface — if a mutation
-			// breaks it, that's a real fail, not a runner error.
-			got = runner.ExecResult{
-				Raised:    true,
-				Exception: "SubprocessError",
-				Message:   runReason.Message,
-			}
-		}
 
-		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
-		if actual != expected {
+			actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
+			if actual == expected {
+				return nil
+			}
 			if expected == outcomeFail &&
 				actual == outcomeUnchanged &&
 				discriminatingStrategies[m.Strategy] &&
 				!stepBodiesEqual(baseline.Action, mutAction) {
 				token, _ := resolveSwapToken(m)
-				reasons = append(reasons, Reason{
+				return []Reason{{
 					Code: "mutation_did_not_discriminate",
 					Message: fmt.Sprintf(
 						"mutation #%d (%s) on %s: rewrote source but produced no behavioural change. "+
 							"The token %q was substituted in the action source but the program's observable "+
 							"output was byte-identical to the baseline. Pick a token that actually discriminates.",
 						idx+1, m.Strategy, branch, token),
-				})
-				continue
+				}}
 			}
-			reasons = append(reasons, Reason{
+			return []Reason{{
 				Code: "mutation_outcome_mismatch",
 				Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
 					idx+1, m.Strategy, branch, expected, actual),
-			})
-		}
+			}}
+		}()
+		reasons = append(reasons, mutReasons...)
 	}
 	return reasons, true
 }

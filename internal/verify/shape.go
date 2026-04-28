@@ -152,3 +152,77 @@ func pathExtractStep(path string) runner.Step {
 	}
 	return runner.Step{Type: "code", Lang: "python", Body: sb.String()}
 }
+
+// preparedBranches is the typed bundle of per-branch step shapes + inputs that
+// every tier orchestrator (unit, integration replay, integration reexecute)
+// builds before executing branches. Centralising the construction here
+// eliminates the ~30-line copy-paste block that was duplicated across
+// runUnit, runIntegration, and runReexecute.
+type preparedBranches struct {
+	FailedSetup   []runner.Step
+	FailedAction  []runner.Step
+	WorkingSetup  []runner.Step
+	WorkingAction []runner.Step
+	FailedInputs  map[string]any
+	WorkingInputs map[string]any
+}
+
+// prepareBranches normalises both branches' setup/action step shapes,
+// optionally appends a path-extract step to each branch's action (skipped when
+// appendPathExtract is false — reexecute mode returns stdout strings, not
+// Python objects, so dict path extraction does not apply), splits and merges
+// inputs against the entry's literals block, and returns either the populated
+// preparedBranches or a single rejection Reason naming the first malformed
+// field. The Reason matches the legacy code shape so existing tier rejection
+// codes (malformed_failed_setup, malformed_working_action, malformed_inputs,
+// malformed_return_path) stay stable.
+func prepareBranches(e *Entry, appendPathExtract bool) (preparedBranches, *Reason) {
+	var p preparedBranches
+
+	if v, err := stepsFromAny(e.FailedApproach.Setup); err != nil {
+		return p, &Reason{Code: "malformed_failed_setup", Message: err.Error()}
+	} else {
+		p.FailedSetup = v
+	}
+	if v, err := stepsFromAny(e.FailedApproach.Action); err != nil {
+		return p, &Reason{Code: "malformed_failed_action", Message: err.Error()}
+	} else {
+		p.FailedAction = v
+	}
+	if v, err := stepsFromAny(e.WorkingApproach.Setup); err != nil {
+		return p, &Reason{Code: "malformed_working_setup", Message: err.Error()}
+	} else {
+		p.WorkingSetup = v
+	}
+	if v, err := stepsFromAny(e.WorkingApproach.Action); err != nil {
+		return p, &Reason{Code: "malformed_working_action", Message: err.Error()}
+	} else {
+		p.WorkingAction = v
+	}
+
+	if appendPathExtract {
+		failedPath, err := returnPathFromDifferential(e.Verification.Differential, "failed_branch_must_return")
+		if err != nil {
+			return p, &Reason{Code: "malformed_return_path", Message: err.Error()}
+		}
+		workingPath, err := returnPathFromDifferential(e.Verification.Differential, "working_branch_must_return")
+		if err != nil {
+			return p, &Reason{Code: "malformed_return_path", Message: err.Error()}
+		}
+		if failedPath != "" {
+			p.FailedAction = append(p.FailedAction, pathExtractStep(failedPath))
+		}
+		if workingPath != "" {
+			p.WorkingAction = append(p.WorkingAction, pathExtractStep(workingPath))
+		}
+	}
+
+	failedInputs, workingInputs, err := splitInputs(e.Verification.Differential)
+	if err != nil {
+		return p, &Reason{Code: "malformed_inputs", Message: err.Error()}
+	}
+	p.FailedInputs = mergeLiterals(e.Literals, failedInputs)
+	p.WorkingInputs = mergeLiterals(e.Literals, workingInputs)
+
+	return p, nil
+}

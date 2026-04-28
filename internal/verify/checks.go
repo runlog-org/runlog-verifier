@@ -2,6 +2,7 @@ package verify
 
 import (
 	"fmt"
+	"regexp"
 )
 
 // Reason is a single rejection cause emitted by a failed check. Code is
@@ -130,7 +131,7 @@ func checkMutationDiscriminating(e *Entry) []Reason {
 		if m.Branch == "" && m.ExpectedResult == "fail" {
 			// Conservative: only count when the target path mentions the
 			// working branch, otherwise we cannot prove it discriminates.
-			if containsToken(m.Target, "working_approach") {
+			if workingApproachToken.MatchString(m.Target) {
 				return nil
 			}
 		}
@@ -237,23 +238,8 @@ func mutationExpects(m Mutation, want string) bool {
 	return false
 }
 
-// containsToken returns true when target contains the literal token
-// surrounded by non-identifier boundaries — used for conservative
-// discrimination matching when no explicit branch is set.
-func containsToken(target, token string) bool {
-	for i := 0; i+len(token) <= len(target); i++ {
-		if target[i:i+len(token)] != token {
-			continue
-		}
-		left := i == 0 || !isIdent(target[i-1])
-		right := i+len(token) == len(target) || !isIdent(target[i+len(token)])
-		if left && right {
-			return true
-		}
-	}
-	return false
-}
-
-func isIdent(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
-}
+// workingApproachToken matches the literal "working_approach" surrounded by
+// word boundaries — used for conservative discrimination matching when no
+// explicit branch is set on a mutation. \b anchors on [A-Za-z0-9_], which
+// matches the prior hand-rolled isIdent definition byte-for-byte.
+var workingApproachToken = regexp.MustCompile(`\bworking_approach\b`)

@@ -73,53 +73,20 @@ func runUnit(e *Entry) Result {
 		return res
 	}
 
-	failedSetup, err := stepsFromAny(e.FailedApproach.Setup)
-	if err != nil {
-		return rejected(res, "malformed_failed_setup", err.Error())
+	prep, reason := prepareBranches(e, true)
+	if reason != nil {
+		res.Status = "rejected"
+		res.Reasons = []Reason{*reason}
+		return res
 	}
-	failedAction, err := stepsFromAny(e.FailedApproach.Action)
-	if err != nil {
-		return rejected(res, "malformed_failed_action", err.Error())
-	}
-	workingSetup, err := stepsFromAny(e.WorkingApproach.Setup)
-	if err != nil {
-		return rejected(res, "malformed_working_setup", err.Error())
-	}
-	workingAction, err := stepsFromAny(e.WorkingApproach.Action)
-	if err != nil {
-		return rejected(res, "malformed_working_action", err.Error())
-	}
-
-	failedPath, err := returnPathFromDifferential(e.Verification.Differential, "failed_branch_must_return")
-	if err != nil {
-		return rejected(res, "malformed_return_path", err.Error())
-	}
-	workingPath, err := returnPathFromDifferential(e.Verification.Differential, "working_branch_must_return")
-	if err != nil {
-		return rejected(res, "malformed_return_path", err.Error())
-	}
-	if failedPath != "" {
-		failedAction = append(failedAction, pathExtractStep(failedPath))
-	}
-	if workingPath != "" {
-		workingAction = append(workingAction, pathExtractStep(workingPath))
-	}
-
-	failedInputs, workingInputs, err := splitInputs(e.Verification.Differential)
-	if err != nil {
-		return rejected(res, "malformed_inputs", err.Error())
-	}
-
-	failedInputs = mergeLiterals(e.Literals, failedInputs)
-	workingInputs = mergeLiterals(e.Literals, workingInputs)
 
 	timeout := e.Verification.TimeoutSeconds
 
-	failedRes, err := driver.Run(failedSetup, failedAction, failedInputs, timeout)
+	failedRes, err := driver.Run(prep.FailedSetup, prep.FailedAction, prep.FailedInputs, timeout)
 	if err != nil {
 		return runnerError(res, "failed_approach", err)
 	}
-	workingRes, err := driver.Run(workingSetup, workingAction, workingInputs, timeout)
+	workingRes, err := driver.Run(prep.WorkingSetup, prep.WorkingAction, prep.WorkingInputs, timeout)
 	if err != nil {
 		return runnerError(res, "working_approach", err)
 	}
@@ -138,16 +105,16 @@ func runUnit(e *Entry) Result {
 
 	baseline := mutationBaseline{
 		Failed: branchBaseline{
-			Setup:  failedSetup,
-			Action: failedAction,
-			Inputs: failedInputs,
+			Setup:  prep.FailedSetup,
+			Action: prep.FailedAction,
+			Inputs: prep.FailedInputs,
 			Result: failedRes,
 			Driver: driver,
 		},
 		Working: branchBaseline{
-			Setup:  workingSetup,
-			Action: workingAction,
-			Inputs: workingInputs,
+			Setup:  prep.WorkingSetup,
+			Action: prep.WorkingAction,
+			Inputs: prep.WorkingInputs,
 			Result: workingRes,
 			Driver: driver,
 		},

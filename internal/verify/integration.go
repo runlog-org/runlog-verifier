@@ -141,23 +141,16 @@ func runIntegration(e *Entry) Result {
 		return res
 	}
 
-	// ── Branch step shape ────────────────────────────────────────────
-	failedSetup, err := stepsFromAny(e.FailedApproach.Setup)
-	if err != nil {
-		return rejected(res, "malformed_failed_setup", err.Error())
+	// ── Branch step shape + path extractor + inputs ──────────────────
+	prep, prepReason := prepareBranches(e, true)
+	if prepReason != nil {
+		res.Status = "rejected"
+		res.Reasons = []Reason{*prepReason}
+		return res
 	}
-	failedAction, err := stepsFromAny(e.FailedApproach.Action)
-	if err != nil {
-		return rejected(res, "malformed_failed_action", err.Error())
-	}
-	workingSetup, err := stepsFromAny(e.WorkingApproach.Setup)
-	if err != nil {
-		return rejected(res, "malformed_working_setup", err.Error())
-	}
-	workingAction, err := stepsFromAny(e.WorkingApproach.Action)
-	if err != nil {
-		return rejected(res, "malformed_working_action", err.Error())
-	}
+	failedSetup, failedAction := prep.FailedSetup, prep.FailedAction
+	workingSetup, workingAction := prep.WorkingSetup, prep.WorkingAction
+	failedInputs, workingInputs := prep.FailedInputs, prep.WorkingInputs
 
 	// ── Replay sequences (per docs/03 §5.4 and existing seed shape) ──
 	failedSeq, err := stringList(e.Verification.Differential, "failed_approach_replay_sequence")
@@ -184,46 +177,30 @@ func runIntegration(e *Entry) Result {
 		return res
 	}
 
-	// Path extractor (reused from unit tier — same semantics).
-	failedPath, err := returnPathFromDifferential(e.Verification.Differential, "failed_branch_must_return")
-	if err != nil {
-		return rejected(res, "malformed_return_path", err.Error())
-	}
-	workingPath, err := returnPathFromDifferential(e.Verification.Differential, "working_branch_must_return")
-	if err != nil {
-		return rejected(res, "malformed_return_path", err.Error())
-	}
-	if failedPath != "" {
-		failedAction = append(failedAction, pathExtractStep(failedPath))
-	}
-	if workingPath != "" {
-		workingAction = append(workingAction, pathExtractStep(workingPath))
-	}
-
-	failedInputs, workingInputs, err := splitInputs(e.Verification.Differential)
-	if err != nil {
-		return rejected(res, "malformed_inputs", err.Error())
-	}
-	failedInputs = mergeLiterals(e.Literals, failedInputs)
-	workingInputs = mergeLiterals(e.Literals, workingInputs)
-
 	timeout := e.Verification.TimeoutSeconds
 
 	// ── Failed branch run (if a sequence is declared) ─────────────────
+	//
+	// Each branch run uses runStubbedBranch so the per-branch stub server is
+	// closed immediately after the branch returns. A function-scope `defer
+	// stub.Close()` would keep the failed-branch stub (port + handler
+	// goroutine) alive across the working-branch run and the entire mutation
+	// loop — a real resource leak in the long-running case.
 	var failedRes runner.ExecResult
 	failedHasRun := false
 	if len(failedSeq) > 0 {
-		stub := cassette.NewStub(cas, failedSeq)
-		defer stub.Close()
-		failedInputs = withEndpoint(failedInputs, stub.URL())
-
-		failedRes, err = runner.RunPython(failedSetup, failedAction, failedInputs, timeout)
-		if err != nil {
-			return runnerError(res, "failed_approach", err)
+		var (
+			runErr error
+			rsns   []Reason
+		)
+		failedRes, runErr, rsns, failedInputs = runStubbedBranch(
+			"failed_approach", cas, failedSeq, failedSetup, failedAction, failedInputs, timeout)
+		if runErr != nil {
+			return runnerError(res, "failed_approach", runErr)
 		}
-		if reasons := stubReasons("failed_approach", stub); len(reasons) > 0 {
+		if len(rsns) > 0 {
 			res.Status = "rejected"
-			res.Reasons = reasons
+			res.Reasons = rsns
 			return res
 		}
 		failedHasRun = true
@@ -233,17 +210,18 @@ func runIntegration(e *Entry) Result {
 	var workingRes runner.ExecResult
 	workingHasRun := false
 	if len(workingSeq) > 0 {
-		stub := cassette.NewStub(cas, workingSeq)
-		defer stub.Close()
-		workingInputs = withEndpoint(workingInputs, stub.URL())
-
-		workingRes, err = runner.RunPython(workingSetup, workingAction, workingInputs, timeout)
-		if err != nil {
-			return runnerError(res, "working_approach", err)
+		var (
+			runErr error
+			rsns   []Reason
+		)
+		workingRes, runErr, rsns, workingInputs = runStubbedBranch(
+			"working_approach", cas, workingSeq, workingSetup, workingAction, workingInputs, timeout)
+		if runErr != nil {
+			return runnerError(res, "working_approach", runErr)
 		}
-		if reasons := stubReasons("working_approach", stub); len(reasons) > 0 {
+		if len(rsns) > 0 {
 			res.Status = "rejected"
-			res.Reasons = reasons
+			res.Reasons = rsns
 			return res
 		}
 		workingHasRun = true
@@ -317,6 +295,39 @@ func runIntegration(e *Entry) Result {
 
 	res.Status = "verified"
 	return res
+}
+
+// runStubbedBranch creates a per-branch HTTP stub, rebinds $ENDPOINT to the
+// stub's URL on a fresh inputs copy, runs the branch through the Python
+// driver, and closes the stub before returning. The stub's lifetime is bounded
+// by this function so the goroutine + listener do not outlive the branch run
+// (a function-scope defer in the caller would keep them alive across
+// subsequent branches and the mutation loop).
+//
+// Returns the exec result, an environmental error (timeout / missing
+// interpreter — surfaced via runnerError by the caller), any cassette-shape
+// rejection reasons (unmatched request / sequence underrun), and the
+// $ENDPOINT-bound inputs map for re-use by the mutation loop.
+func runStubbedBranch(
+	branchName string,
+	cas *cassette.Cassette,
+	seq []string,
+	setup, action []runner.Step,
+	inputs map[string]any,
+	timeout float64,
+) (runner.ExecResult, error, []Reason, map[string]any) {
+	stub := cassette.NewStub(cas, seq)
+	defer stub.Close()
+	inputs = withEndpoint(inputs, stub.URL())
+
+	res, err := runner.RunPython(setup, action, inputs, timeout)
+	if err != nil {
+		return runner.ExecResult{}, err, nil, inputs
+	}
+	if reasons := stubReasons(branchName, stub); len(reasons) > 0 {
+		return res, nil, reasons, inputs
+	}
+	return res, nil, nil, inputs
 }
 
 // withEndpoint returns a fresh inputs map with $ENDPOINT bound to url. Existing
@@ -439,22 +450,14 @@ type integrationMutationCtx struct {
 	workingSeq []string
 }
 
-// runMutationsWithCtx is the integration-tier wrapper around runMutations.
-// It intercepts the per-branch baseline at apply-time to replace inputs with a
-// stub-aware copy, runs the mutation, and tears down the stub. The mutation
-// framework itself (mutate.go) is unchanged.
+// runMutationsWithCtx is the integration-tier wrapper that threads the
+// per-branch cassette + replay sequences through the shared mutation loop. The
+// dispatcher itself lives in iterateMutations (mutate.go); this wrapper only
+// closes over ctx so the tier-specific per-mutation runner can see it.
 func runMutationsWithCtx(e *Entry, b mutationBaseline, ctx integrationMutationCtx) ([]Reason, bool) {
-	var reasons []Reason
-	supported := true
-
-	for i, m := range e.Verification.Mutations {
-		mr, ok := runOneIntegrationMutation(e, b, m, i, ctx)
-		if !ok {
-			supported = false
-		}
-		reasons = append(reasons, mr...)
-	}
-	return reasons, supported
+	return iterateMutations(e, func(m Mutation, i int) ([]Reason, bool) {
+		return runOneIntegrationMutation(e, b, m, i, ctx)
+	})
 }
 
 // runOneIntegrationMutation mirrors runOneMutation but re-runs the mutated

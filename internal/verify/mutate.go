@@ -237,11 +237,26 @@ func supportedStrategiesMessage() string {
 //   - supported=true, len(reasons)>0 → at least one mutation produced an
 //     unexpected outcome; caller must surface rejected.
 func runMutations(e *Entry, b mutationBaseline) ([]Reason, bool) {
+	return iterateMutations(e, func(m Mutation, i int) ([]Reason, bool) {
+		return runOneMutation(e, b, m, i)
+	})
+}
+
+// iterateMutations is the shared mutation-loop scaffold used by all three
+// tiers (unit/function, integration/replay, integration/reexecute). It walks
+// e.Verification.Mutations, dispatches each mutation through the supplied
+// per-mutation runner, accumulates Reasons in declaration order, and reports
+// supported=false when any mutation's strategy is unimplemented in the build.
+//
+// The per-tier runOne* helpers carry the tier-specific re-run mechanics
+// (PythonDriver baseline, per-mutation HTTP stub, per-mutation tmpdir
+// sandbox); this loop owns only the supported-flag aggregation that was
+// duplicated identically in three places.
+func iterateMutations(e *Entry, runOne func(m Mutation, i int) ([]Reason, bool)) ([]Reason, bool) {
 	var reasons []Reason
 	supported := true
-
 	for i, m := range e.Verification.Mutations {
-		mr, ok := runOneMutation(e, b, m, i)
+		mr, ok := runOne(m, i)
 		if !ok {
 			supported = false
 		}
