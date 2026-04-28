@@ -1,0 +1,121 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (smoke run; no Release will be created)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # required for softprops/action-gh-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: runlog-verifier
+
+      # cache: false matches verifier.yml — go.sum is small, build is fast.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+
+      - name: Tidy
+        working-directory: runlog-verifier
+        run: go mod tidy
+
+      - name: Resolve version + commit
+        id: meta
+        working-directory: runlog-verifier
+        run: |
+          ref="${GITHUB_REF##*/}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            ref="${{ inputs.tag }}"
+          fi
+          commit=$(git rev-parse --short HEAD)
+          echo "version=${ref}" >> "$GITHUB_OUTPUT"
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          # Pre-release tags (vX-rcN, vX-betaN) ship as drafts.
+          case "$ref" in
+            *-rc*|*-beta*|*-alpha*) echo "draft=true"  >> "$GITHUB_OUTPUT" ;;
+            *)                      echo "draft=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # Cross-compile the four target binaries with the same reproducibility
+      # flags as the Makefile (-trimpath -buildvcs=false, ldflags pinning
+      # Version + Commit, -s -w). Build each binary twice in separate output
+      # dirs and fail fast if any pair diverges — same trust model as the
+      # single-target check in verifier.yml, extended to all four targets.
+      # See runlog-docs/03-verification-and-provenance.md §5.4.
+      - name: Build + reproducibility check (all targets)
+        working-directory: runlog-verifier
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          COMMIT:  ${{ steps.meta.outputs.commit }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/a dist/b dist/release
+          targets=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64)
+          ldflags="-X main.Version=${VERSION} -X main.Commit=${COMMIT} -s -w"
+          for t in "${targets[@]}"; do
+            goos="${t%/*}"; goarch="${t#*/}"
+            name="runlog-verifier-${goos}-${goarch}"
+            for out in dist/a dist/b; do
+              GOOS="$goos" GOARCH="$goarch" \
+                go build -trimpath -buildvcs=false \
+                  -ldflags "$ldflags" \
+                  -o "$out/$name" \
+                  ./cmd/runlog-verifier
+            done
+            sha_a=$(sha256sum "dist/a/$name" | awk '{print $1}')
+            sha_b=$(sha256sum "dist/b/$name" | awk '{print $1}')
+            if [ "$sha_a" != "$sha_b" ]; then
+              echo "::error::Reproducibility check FAILED for $name:"
+              echo "  build 1: $sha_a"
+              echo "  build 2: $sha_b"
+              exit 1
+            fi
+            echo "Reproducible $name: $sha_a"
+            cp "dist/a/$name" "dist/release/$name"
+          done
+
+      - name: Generate SHA256SUMS
+        working-directory: runlog-verifier
+        run: |
+          set -euo pipefail
+          cd dist/release
+          # One line per binary: "<sha256>  runlog-verifier-<os>-<arch>"
+          # Sorted for stable diffs across releases.
+          sha256sum runlog-verifier-* | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: runlog-verifier-${{ steps.meta.outputs.version }}
+          path: runlog-verifier/dist/release/*
+          if-no-files-found: error
+
+      # Only create a Release on a real tag push. workflow_dispatch is a
+      # smoke run — artifacts above are enough to inspect.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: ${{ steps.meta.outputs.draft == 'true' }}
+          fail_on_unmatched_files: true
+          files: |
+            runlog-verifier/dist/release/runlog-verifier-linux-amd64
+            runlog-verifier/dist/release/runlog-verifier-linux-arm64
+            runlog-verifier/dist/release/runlog-verifier-darwin-amd64
+            runlog-verifier/dist/release/runlog-verifier-darwin-arm64
+            runlog-verifier/dist/release/SHA256SUMS
