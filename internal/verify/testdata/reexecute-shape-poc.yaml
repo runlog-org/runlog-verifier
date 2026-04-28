@@ -2,6 +2,10 @@ unit_id: reexecute-shape-poc-shell-uppercase
 domain:
   - shell-utilities
   - testdata
+version_constraints:
+  runtime:
+    name: sh
+    version: ">=4.0"
 
 # Failed approach: returns the file's literal lowercase content via cat.
 failed_approach:
