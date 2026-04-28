@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	runlogschema "github.com/runlog-org/runlog-schema"
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"gopkg.in/yaml.v3"
 )
@@ -15,42 +16,30 @@ import (
 // TestSchemaOracle exercises the schema-as-test-oracle slice of F31:
 // for each canonical sample entry, both
 //   (a) the entry parses cleanly through verify.Run, AND
-//   (b) the entry validates against runlog-schema/entry.schema.yaml.
+//   (b) the entry validates against the canonical entry schema.
 // Either side breaking — verifier accepting a non-schema-valid entry, or a
 // schema-valid entry crashing the loader — is a test failure.
 //
-// The schema lives in a sibling repo (runlog-org/runlog-schema). Set
-// RUNLOG_SCHEMA_PATH to point at entry.schema.yaml; default assumes a
-// sibling clone at ../../../runlog-schema/. When the schema is missing AND
-// the env var is unset, the entire test skips so a standalone verifier
-// checkout still runs the rest of the suite. Mirrors the existing
-// RUNLOG_SCHEMA_PATH pattern in primitives_test.go.
+// The schema is consumed as a Go module (github.com/runlog-org/runlog-schema)
+// — its embedded JSON bytes are always present, so this test no longer
+// needs an env-var override or a skip-when-missing branch. See go.mod for
+// the replace directive that resolves the module to a sibling clone until
+// the schema repo is tagged.
 //
 // The compiler is fed the schema as an in-memory JSON resource — no network
 // calls happen during this test.
 func TestSchemaOracle(t *testing.T) {
-	schemaPath := os.Getenv("RUNLOG_SCHEMA_PATH")
-	if schemaPath == "" {
-		schemaPath = filepath.Join("..", "..", "..", "runlog-schema", "entry.schema.yaml")
-	}
-	schemaBytes, err := os.ReadFile(schemaPath)
+	// Use the module's pre-converted JSON form rather than re-running the
+	// YAML→JSON conversion locally. The conversion is deterministic and
+	// the result is cached in the module after the first call.
+	schemaJSON, err := runlogschema.EntrySchemaJSON()
 	if err != nil {
-		if os.IsNotExist(err) {
-			t.Skipf("schema not found at %s; clone runlog-org/runlog-schema as a sibling or set RUNLOG_SCHEMA_PATH", schemaPath)
-		}
-		t.Fatalf("read schema: %v", err)
+		t.Fatalf("load entry schema as JSON: %v", err)
 	}
 
-	// Convert YAML schema → JSON in-memory; the jsonschema/v5 compiler
-	// expects a JSON document on AddResource. The schema's $id is
-	// https://runlog.org/schemas/entry/v1.json — register it under that
-	// URL so the compiler resolves the document locally and never reaches
-	// for the network.
-	schemaJSON, err := yamlBytesToJSONBytes(schemaBytes)
-	if err != nil {
-		t.Fatalf("convert schema YAML to JSON: %v", err)
-	}
-
+	// The schema's $id is https://runlog.org/schemas/entry/v1.json — register
+	// it under that URL so the compiler resolves the document locally and
+	// never reaches for the network.
 	const schemaURL = "https://runlog.org/schemas/entry/v1.json"
 	compiler := jsonschema.NewCompiler()
 	if err := compiler.AddResource(schemaURL, strings.NewReader(string(schemaJSON))); err != nil {
@@ -173,9 +162,12 @@ func TestSchemaOracle(t *testing.T) {
 }
 
 // yamlBytesToJSONBytes parses YAML and emits canonical JSON bytes. The
-// jsonschema/v5 compiler and its Validate path both expect JSON-native
-// values (string-keyed maps, slices, JSON primitives); routing through
+// jsonschema/v5 compiler's Validate path expects JSON-native values
+// (string-keyed maps, slices, JSON primitives); routing through
 // json.Marshal guarantees that shape for any yaml.v3 input.
+//
+// Used here for sample-entry YAML; the schema itself is loaded as JSON
+// directly via runlogschema.EntrySchemaJSON.
 func yamlBytesToJSONBytes(data []byte) ([]byte, error) {
 	var node any
 	if err := yaml.Unmarshal(data, &node); err != nil {

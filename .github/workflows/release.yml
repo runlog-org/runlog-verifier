@@ -23,6 +23,16 @@ jobs:
         with:
           path: runlog-verifier
 
+      # The replace directive in go.mod resolves
+      # github.com/runlog-org/runlog-schema to ../runlog-schema relative
+      # to runlog-verifier, so CI must check the schema repo out as a
+      # sibling. Drop this step once the schema is tagged and the replace
+      # directive is removed (see go.mod comment).
+      - uses: actions/checkout@v4
+        with:
+          repository: runlog-org/runlog-schema
+          path: runlog-schema
+
       # cache: false matches verifier.yml — go.sum is small, build is fast.
       - uses: actions/setup-go@v5
         with:

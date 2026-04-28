@@ -1,11 +1,10 @@
 package verify
 
 import (
-	"os"
-	"path/filepath"
 	"sort"
 	"testing"
 
+	runlogschema "github.com/runlog-org/runlog-schema"
 	"gopkg.in/yaml.v3"
 )
 
@@ -13,22 +12,13 @@ import (
 // the schema enum at
 // properties.verification.properties.primitives_required.items.enum diverge.
 //
-// The schema lives in a sibling repo (runlog-org/runlog-schema). Set
-// RUNLOG_SCHEMA_PATH to point at entry.schema.yaml; default assumes a
-// sibling clone at ../../../../runlog-schema/. Skips when not found so a
-// standalone verifier checkout can still run the rest of the suite.
+// The schema is consumed as a Go module (github.com/runlog-org/runlog-schema)
+// — the embedded YAML bytes are always present, so the test no longer
+// needs an env-var override or a skip-when-missing branch. See go.mod for
+// the replace directive that resolves the module to a sibling clone until
+// the schema repo is tagged.
 func TestRegisteredPrimitivesMatchesSchema(t *testing.T) {
-	schemaPath := os.Getenv("RUNLOG_SCHEMA_PATH")
-	if schemaPath == "" {
-		schemaPath = filepath.Join("..", "..", "..", "runlog-schema", "entry.schema.yaml")
-	}
-	data, err := os.ReadFile(schemaPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			t.Skipf("schema not found at %s; clone runlog-org/runlog-schema as a sibling or set RUNLOG_SCHEMA_PATH", schemaPath)
-		}
-		t.Fatalf("read schema: %v", err)
-	}
+	data := runlogschema.EntrySchemaYAML()
 
 	var root map[string]any
 	if err := yaml.Unmarshal(data, &root); err != nil {
