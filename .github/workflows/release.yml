@@ -20,32 +20,16 @@ jobs:
       contents: write  # required for softprops/action-gh-release
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: runlog-verifier
 
-      # The replace directive in go.mod resolves
-      # github.com/runlog-org/runlog-schema to ../runlog-schema relative
-      # to runlog-verifier, so CI must check the schema repo out as a
-      # sibling. Drop this step once the schema is tagged and the replace
-      # directive is removed (see go.mod comment).
-      - uses: actions/checkout@v4
-        with:
-          repository: runlog-org/runlog-schema
-          path: runlog-schema
-
-      # cache: false matches verifier.yml — go.sum is small, build is fast.
+      # runlog-schema is a regular Go module dependency pinned in
+      # go.mod ([F28]); proxy.golang.org serves it. No sibling checkout.
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-          cache: false
-
-      - name: Tidy
-        working-directory: runlog-verifier
-        run: go mod tidy
+          cache: true
 
       - name: Resolve version + commit
         id: meta
-        working-directory: runlog-verifier
         run: |
           ref="${GITHUB_REF##*/}"
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
@@ -67,7 +51,6 @@ jobs:
       # single-target check in verifier.yml, extended to all four targets.
       # See runlog-docs/03-verification-and-provenance.md §5.4.
       - name: Build + reproducibility check (all targets)
-        working-directory: runlog-verifier
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           COMMIT:  ${{ steps.meta.outputs.commit }}
@@ -99,7 +82,6 @@ jobs:
           done
 
       - name: Generate SHA256SUMS
-        working-directory: runlog-verifier
         run: |
           set -euo pipefail
           cd dist/release
@@ -112,7 +94,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: runlog-verifier-${{ steps.meta.outputs.version }}
-          path: runlog-verifier/dist/release/*
+          path: dist/release/*
           if-no-files-found: error
 
       # Only create a Release on a real tag push. workflow_dispatch is a
@@ -124,8 +106,8 @@ jobs:
           draft: ${{ steps.meta.outputs.draft == 'true' }}
           fail_on_unmatched_files: true
           files: |
-            runlog-verifier/dist/release/runlog-verifier-linux-amd64
-            runlog-verifier/dist/release/runlog-verifier-linux-arm64
-            runlog-verifier/dist/release/runlog-verifier-darwin-amd64
-            runlog-verifier/dist/release/runlog-verifier-darwin-arm64
-            runlog-verifier/dist/release/SHA256SUMS
+            dist/release/runlog-verifier-linux-amd64
+            dist/release/runlog-verifier-linux-arm64
+            dist/release/runlog-verifier-darwin-amd64
+            dist/release/runlog-verifier-darwin-arm64
+            dist/release/SHA256SUMS
