@@ -57,6 +57,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/runlog-org/runlog-verifier/internal/verify/cassette"
 	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
@@ -235,13 +236,35 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 		_ = os.RemoveAll(workdir)
 
 		code := "setup_script_failed"
-		if errors.Is(err, runner.ErrInterpreterMissing) {
+		switch {
+		case errors.Is(err, runner.ErrInputInvalidName):
+			code = "cassette_input_invalid_name"
+		case errors.Is(err, runner.ErrInterpreterMissing):
 			code = "runtime_unavailable"
-		} else if errors.Is(err, runner.ErrTimeout) {
+		case errors.Is(err, runner.ErrTimeout):
 			code = "branch_timeout"
 		}
 		r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, err)}
 		return runner.ExecResult{}, runner.SubprocessDriver{}, &r
+	}
+
+	// db.sqlite Lstat guard: if the cassette's setup_script created a
+	// symlink at <workdir>/db.sqlite, subsequent sqlite3 invocations would
+	// follow it and write outside the sandbox. Refuse to proceed.
+	if cas.Runtime.Tool == "sqlite" {
+		dbPath := filepath.Join(workdir, "db.sqlite")
+		if info, err := os.Lstat(dbPath); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				_ = driver.RunTeardownScript(cas.TeardownScript, inputs, timeout)
+				_ = os.RemoveAll(workdir)
+				r := Reason{
+					Code: "sandbox_symlink_rejected",
+					Message: fmt.Sprintf("%s: db.sqlite is a symlink; refusing to follow it",
+						branchName),
+				}
+				return runner.ExecResult{}, runner.SubprocessDriver{}, &r
+			}
+		}
 	}
 
 	res, err := driver.Run(setup, action, inputs, timeout)
@@ -251,6 +274,8 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 
 		code := "branch_runner_error"
 		switch {
+		case errors.Is(err, runner.ErrInputInvalidName):
+			code = "cassette_input_invalid_name"
 		case errors.Is(err, runner.ErrInterpreterMissing):
 			code = "runtime_unavailable"
 		case errors.Is(err, runner.ErrTimeout):

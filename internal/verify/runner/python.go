@@ -113,13 +113,13 @@ func (PythonDriver) Run(setup, action []Step, inputs map[string]any, timeoutSec 
 		if errors.As(runErr, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound) {
 			return ExecResult{}, fmt.Errorf("%w: %v", ErrInterpreterMissing, runErr)
 		}
-		return ExecResult{}, fmt.Errorf("python subprocess: %w (stderr=%s)", runErr, stderr.String())
+		return ExecResult{}, fmt.Errorf("python subprocess: %w (stderr=%s)", runErr, redactStderr(stderr.Bytes()))
 	}
 
 	var res ExecResult
 	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
 		return ExecResult{}, fmt.Errorf("%w: %v (stdout=%q, stderr=%q)",
-			ErrDriverOutput, err, stdout.String(), stderr.String())
+			ErrDriverOutput, err, stdout.String(), redactStderr(stderr.Bytes()))
 	}
 	return res, nil
 }

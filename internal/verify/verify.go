@@ -9,14 +9,23 @@ import (
 
 // Result is the outcome of running the verifier against an entry.
 type Result struct {
-	UnitID   string   `json:"unit_id"`
-	Tier     string   `json:"tier"`     // verification.type from the entry
-	Status   string   `json:"status"`   // "verified" | "rejected" | "tier_unsupported"
-	Reasons  []Reason `json:"reasons"`  // empty when Status == "verified"
+	UnitID  string   `json:"unit_id"`
+	Tier    string   `json:"tier"`    // verification.type from the entry
+	Status  string   `json:"status"`  // "verified" | "rejected" | "tier_unsupported"
+	Reasons []Reason `json:"reasons"` // empty when Status == "verified"
 }
+
+// MaxEntryBytes caps the size of an entry YAML file the verifier will
+// decode. The schema does not bound entry size directly; without a cap,
+// a hostile or malformed entry could exhaust memory during yaml.Unmarshal.
+// 1 MiB is well above any realistic hand-authored entry.
+const MaxEntryBytes = 1 << 20
 
 // ErrEntryEmpty is returned when the YAML decodes but yields a zero entry.
 var ErrEntryEmpty = errors.New("entry is empty after YAML decode")
+
+// ErrEntryTooLarge is returned when the entry payload exceeds MaxEntryBytes.
+var ErrEntryTooLarge = fmt.Errorf("entry exceeds %d bytes", MaxEntryBytes)
 
 // Run decodes data as a runlog entry and runs the v0.1 Phase 2 checks.
 //
@@ -26,6 +35,9 @@ var ErrEntryEmpty = errors.New("entry is empty after YAML decode")
 // with Status == "rejected" and a populated Reasons slice — they are not
 // errors.
 func Run(data []byte) (Result, error) {
+	if len(data) > MaxEntryBytes {
+		return Result{}, ErrEntryTooLarge
+	}
 	var e Entry
 	if err := yaml.Unmarshal(data, &e); err != nil {
 		return Result{}, fmt.Errorf("yaml unmarshal: %w", err)

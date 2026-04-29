@@ -25,6 +25,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/runlog-org/runlog-verifier/internal/fingerprint"
@@ -110,6 +111,27 @@ func printVersion() {
 	fmt.Printf("runlog-verifier %s (commit %s)\n", Version, Commit)
 }
 
+// readEntryFile reads up to verify.MaxEntryBytes+1 bytes from path so we can
+// detect — and reject — entries that exceed the cap without ever materialising
+// an unbounded byte slice. yaml.Unmarshal of a multi-MiB file is a trivial
+// memory-DoS vector that we don't need to support; entries are hand-authored
+// and well under 1 MiB in practice.
+func readEntryFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, verify.MaxEntryBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > verify.MaxEntryBytes {
+		return nil, verify.ErrEntryTooLarge
+	}
+	return data, nil
+}
+
 // runVerify implements the `verify` subcommand.
 // Returns an exit code:
 //
@@ -133,7 +155,7 @@ func runVerify(args []string) int {
 	}
 
 	path := fs.Arg(0)
-	data, err := os.ReadFile(path)
+	data, err := readEntryFile(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "verify: read %s: %v\n", path, err)
 		return 1

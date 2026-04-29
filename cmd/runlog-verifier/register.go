@@ -24,6 +24,11 @@ const (
 	defaultRegisterServer = "https://api.runlog.org"
 	registerPath          = "/v1/register-pubkey"
 	registerHTTPTimeout   = 10 * time.Second
+	// maxResponseBytes caps how much of an HTTP response body we will read
+	// into memory. The register endpoint emits small JSON envelopes; a
+	// hostile or misconfigured server could otherwise stream gigabytes
+	// into the verifier and OOM it.
+	maxResponseBytes = 1 << 20
 )
 
 // registerExitOK / registerExitUser / registerExitNet keep the exit-code
@@ -84,6 +89,12 @@ func runRegister(args []string, stdout, stderr io.Writer) int {
 	endpoint, err := url.Parse(server + registerPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "register: invalid server URL %q: %v\n", server, err)
+		return registerExitUser
+	}
+	if err := validateServerURL(endpoint); err != nil {
+		fmt.Fprintf(stderr,
+			"register: --server / RUNLOG_API_URL %q rejected: %v\n",
+			server, err)
 		return registerExitUser
 	}
 
@@ -172,6 +183,31 @@ func runRegister(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// validateServerURL guards against accidental or hostile --server /
+// RUNLOG_API_URL values that would otherwise smuggle the API key into
+// non-HTTPS endpoints (or non-HTTP schemes entirely). HTTPS is always
+// allowed; plain HTTP is allowed only against loopback (127.0.0.1, ::1,
+// localhost) so test fixtures (httptest.NewServer) keep working without
+// opening a TLS-stripping path against arbitrary hosts.
+func validateServerURL(u *url.URL) error {
+	if u.Host == "" {
+		return errors.New("missing host")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		switch host {
+		case "127.0.0.1", "::1", "localhost":
+			return nil
+		}
+		return fmt.Errorf("scheme http is only allowed against loopback (got host %q)", host)
+	default:
+		return fmt.Errorf("scheme %q is not allowed (use https, or http to loopback)", u.Scheme)
+	}
+}
+
 // loadOrGenerateKey returns (priv, pub, path, err). If the key file
 // already exists and force=false, it loads it (this is the documented
 // "register on a machine that already has a key" path — we still upload
@@ -235,7 +271,7 @@ func postRegisterPubkey(endpoint, apiKey, pubB64 string) (*http.Response, []byte
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(nil, resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read response body: %w", err)
 	}

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -285,20 +286,103 @@ func TestSubprocessTeardownTolerantOfNonZero(t *testing.T) {
 
 func TestSubstituteVarsLongestKeyFirst(t *testing.T) {
 	// Sanity: $DB_PATH must be substituted before $DB to avoid the prefix
-	// eating the longer name.
+	// eating the longer name. Substituted values are shell-quoted (input
+	// values are data, not code) so the assertion includes the surrounding
+	// single quotes.
 	out := substituteVars(
 		"keep $DB_PATH and $DB",
 		map[string]any{"$DB_PATH": "/x/y", "$DB": "shortcut"},
+		shellQuote,
 	)
-	if out != "keep /x/y and shortcut" {
+	if out != "keep '/x/y' and 'shortcut'" {
 		t.Fatalf("substituteVars: %q", out)
 	}
 }
 
 func TestSubstituteVarsLeavesUnknownTokens(t *testing.T) {
 	// Tokens not in inputs (e.g. shell's own $1) must pass through unchanged.
-	out := substituteVars("awk '{print $1}'", map[string]any{"$WORKDIR": "/tmp/x"})
+	out := substituteVars(
+		"awk '{print $1}'",
+		map[string]any{"$WORKDIR": "/tmp/x"},
+		shellQuote,
+	)
 	if out != "awk '{print $1}'" {
 		t.Fatalf("substituteVars: %q (should not touch $1)", out)
+	}
+}
+
+func TestShellQuoteEscapesSingleQuote(t *testing.T) {
+	// A value containing a literal single quote must be escaped via the
+	// `'\''` close-reopen idiom so a hostile cassette can't break out of
+	// the surrounding shell literal.
+	got := shellQuote(`a'b`)
+	want := `'a'\''b'`
+	if got != want {
+		t.Fatalf("shellQuote(%q) = %q, want %q", `a'b`, got, want)
+	}
+}
+
+func TestShellQuoteNeutralizesInjection(t *testing.T) {
+	// Round-trip a hostile value through substituteVars and confirm the
+	// metacharacters end up inside the literal rather than being executed
+	// as fresh shell tokens.
+	out := substituteVars(
+		"echo $X",
+		map[string]any{"$X": "; rm -rf /"},
+		shellQuote,
+	)
+	if out != `echo '; rm -rf /'` {
+		t.Fatalf("substituteVars injection: %q", out)
+	}
+}
+
+func TestSqlQuoteDoublesSingleQuote(t *testing.T) {
+	if got := sqlQuote(`x'y`); got != `'x''y'` {
+		t.Fatalf("sqlQuote(%q) = %q", `x'y`, got)
+	}
+}
+
+func TestValidateInputNameRejectsReserved(t *testing.T) {
+	for _, name := range []string{
+		"PATH", "$PATH", "IFS", "HOME", "LD_PRELOAD", "LD_LIBRARY_PATH",
+		"BASH_ENV", "ENV", "USER", "SHELL", "LANG",
+		"DYLD_INSERT_LIBRARIES", "$DYLD_FRAMEWORK_PATH",
+		"LC_ALL", "LC_MESSAGES",
+		"", "1FOO", "FOO-BAR", "FOO BAR", "$",
+	} {
+		if err := validateInputName(name); err == nil {
+			t.Errorf("validateInputName(%q) accepted; want rejection", name)
+		}
+	}
+}
+
+func TestValidateInputNameAcceptsOrdinary(t *testing.T) {
+	for _, name := range []string{"PAYLOAD", "$PAYLOAD", "_x", "table_name", "K2"} {
+		if err := validateInputName(name); err != nil {
+			t.Errorf("validateInputName(%q) rejected: %v", name, err)
+		}
+	}
+}
+
+func TestRedactStderrRedactsTokens(t *testing.T) {
+	const fakeToken = "EXAMPLE_TOKEN_NOT_A_REAL_SECRET_PADDING_PADDING"
+	in := []byte("Bearer " + fakeToken + " and trailing")
+	out := redactStderr(in)
+	if !strings.Contains(out, "<redacted-token>") {
+		t.Errorf("expected token redaction, got %q", out)
+	}
+	if strings.Contains(out, fakeToken) {
+		t.Errorf("token leaked: %q", out)
+	}
+}
+
+func TestRedactStderrTruncates(t *testing.T) {
+	in := bytes.Repeat([]byte("a"), stderrMaxBytes+512)
+	out := redactStderr(in)
+	if !strings.Contains(out, "[truncated]") {
+		t.Errorf("expected truncation marker, got len=%d", len(out))
+	}
+	if len(out) > stderrMaxBytes+64 {
+		t.Errorf("redactStderr did not bound output: len=%d", len(out))
 	}
 }

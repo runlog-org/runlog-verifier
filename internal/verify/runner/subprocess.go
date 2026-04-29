@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -39,6 +40,80 @@ import (
 // surfaces this as a typed reason naming both the requested lang and the
 // configured tool.
 var ErrSubprocessTool = errors.New("runner: step language not valid for the configured runtime tool")
+
+// ErrInputInvalidName is returned when a cassette/differential input key
+// does not pass validateInputName — either it matches a reserved env-var
+// the host shell relies on (PATH, HOME, LD_PRELOAD, …) or it isn't a
+// well-formed C identifier. The reexecute orchestrator surfaces this as
+// `cassette_input_invalid_name`.
+var ErrInputInvalidName = errors.New("runner: cassette input name is reserved or malformed")
+
+// reservedInputNames is the set of env-var names that a submitter MUST
+// NOT redefine via cassette inputs. Setting any of these would let a
+// hostile entry redirect interpreter lookup, library loading, locale
+// handling, or shell startup before our subprocesses even begin parsing
+// step bodies. Names are compared after $-stripping and case-sensitively
+// (POSIX env-var names are case-sensitive).
+var reservedInputNames = map[string]bool{
+	"PATH":            true,
+	"IFS":             true,
+	"HOME":            true,
+	"USER":            true,
+	"SHELL":           true,
+	"BASH_ENV":        true,
+	"ENV":             true,
+	"LD_PRELOAD":      true,
+	"LD_LIBRARY_PATH": true,
+	"LANG":            true,
+}
+
+// inputNameRE matches a valid POSIX-shell-safe identifier: leading letter
+// or underscore, then letters/digits/underscores. Anything else (including
+// empty, leading digit, dashes, dots) is rejected so we don't end up
+// shell-injecting a key like `FOO=bar; rm -rf /` into the env list.
+var inputNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateInputName enforces the env-var denylist + name shape against a
+// caller-supplied input key. Both `$NAME` and `NAME` spellings are accepted;
+// the `$` is stripped before validation. Returns a wrapped ErrInputInvalidName
+// so the reexecute orchestrator can surface a typed reason.
+//
+// Inputs are treated as DATA, not code: the denylist exists to keep a
+// hostile cassette from redefining the host's interpreter / loader / locale
+// vars, and the shape check exists to keep names from smuggling shell
+// metacharacters into the env-list assembly in buildEnv.
+func validateInputName(key string) error {
+	bare := strings.TrimPrefix(key, "$")
+	if !inputNameRE.MatchString(bare) {
+		return fmt.Errorf("%w: %q is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)",
+			ErrInputInvalidName, key)
+	}
+	if reservedInputNames[bare] {
+		return fmt.Errorf("%w: %q is reserved (host env var)",
+			ErrInputInvalidName, key)
+	}
+	if strings.HasPrefix(bare, "DYLD_") || strings.HasPrefix(bare, "LC_") {
+		return fmt.Errorf("%w: %q is reserved (host env var)",
+			ErrInputInvalidName, key)
+	}
+	return nil
+}
+
+// validateInputs applies validateInputName to every key in inputs. The
+// auto-injected sandbox vars ($WORKDIR, $DB_PATH) are exempt — they are
+// driver-set, not submitter-set.
+func validateInputs(inputs map[string]any) error {
+	for k := range inputs {
+		bare := strings.TrimPrefix(k, "$")
+		if bare == "WORKDIR" || bare == "DB_PATH" {
+			continue
+		}
+		if err := validateInputName(k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // ErrSetupScriptFailed is returned by SubprocessDriver.RunSetupScript when a
 // setup_script line exits non-zero. The sandbox is left intact for the caller
@@ -78,6 +153,9 @@ func (d SubprocessDriver) Run(setup, action []Step, inputs map[string]any, timeo
 	}
 	if d.Workdir == "" {
 		return ExecResult{}, errors.New("runner: SubprocessDriver.Workdir is empty")
+	}
+	if err := validateInputs(inputs); err != nil {
+		return ExecResult{}, err
 	}
 	if err := d.validateSteps(setup); err != nil {
 		return ExecResult{}, err
@@ -158,9 +236,12 @@ func (d SubprocessDriver) RunSetupScript(lines []string, inputs map[string]any, 
 	if len(lines) == 0 {
 		return nil
 	}
+	if err := validateInputs(inputs); err != nil {
+		return err
+	}
 	merged := d.mergeInputs(inputs)
 	for i, line := range lines {
-		stdout, stderr, exit, err := d.execShell(substituteVars(line, merged), merged, timeoutSec)
+		stdout, stderr, exit, err := d.execShell(substituteVars(line, merged, shellQuote), merged, timeoutSec)
 		if err != nil {
 			return fmt.Errorf("setup_script[%d] %q: %w", i, line, err)
 		}
@@ -181,9 +262,12 @@ func (d SubprocessDriver) RunTeardownScript(lines []string, inputs map[string]an
 	if len(lines) == 0 {
 		return nil
 	}
+	if err := validateInputs(inputs); err != nil {
+		return err
+	}
 	merged := d.mergeInputs(inputs)
 	for _, line := range lines {
-		_, _, _, err := d.execShell(substituteVars(line, merged), merged, timeoutSec)
+		_, _, _, err := d.execShell(substituteVars(line, merged, shellQuote), merged, timeoutSec)
 		if err != nil {
 			return err
 		}
@@ -256,11 +340,18 @@ func (d SubprocessDriver) execStep(s Step, inputs map[string]any, timeoutSec flo
 	if lang == "" {
 		lang = "shell"
 	}
-	body := substituteVars(s.Body, inputs)
 	switch lang {
 	case "shell":
+		// Input values are DATA, not code — single-quote them so a value
+		// like `; rm -rf $HOME` is passed verbatim to the program rather
+		// than re-parsed by sh.
+		body := substituteVars(s.Body, inputs, shellQuote)
 		return d.execShell(body, inputs, timeoutSec)
 	case "sql":
+		// Same treatment for sqlite3 SQL bodies — a value like `'); DROP
+		// TABLE t; --` would otherwise close out the literal and tail
+		// arbitrary SQL onto the statement.
+		body := substituteVars(s.Body, inputs, sqlQuote)
 		return d.execSQL(body, inputs, timeoutSec)
 	}
 	// Unreachable — validateSteps already rejected unknown langs.
@@ -354,7 +445,14 @@ func buildEnv(inputs map[string]any) []string {
 //
 // Bare `$-foo` references whose key isn't in inputs pass through unchanged so
 // shell's runtime $-expansion (e.g. `awk '{print $1}'`) keeps working.
-func substituteVars(s string, inputs map[string]any) string {
+//
+// quote is applied to each substituted value before splicing — input values
+// are treated as DATA, not code, so a value like `; rm -rf $HOME` must reach
+// the underlying program as a literal argument rather than a fresh shell /
+// SQL token. The driver-injected sandbox vars ($WORKDIR, $DB_PATH) are
+// also quoted; they're set to absolute paths under os.MkdirTemp so quoting
+// them is a no-op semantically but keeps the path uniform.
+func substituteVars(s string, inputs map[string]any, quote func(string) string) string {
 	if !strings.Contains(s, "$") {
 		return s
 	}
@@ -373,19 +471,65 @@ func substituteVars(s string, inputs map[string]any) string {
 		}
 	}
 	for _, k := range keys {
-		s = strings.ReplaceAll(s, k, fmt.Sprintf("%v", inputs[k]))
+		raw := fmt.Sprintf("%v", inputs[k])
+		s = strings.ReplaceAll(s, k, quote(raw))
 	}
 	return s
+}
+
+// shellQuote returns a single-quoted POSIX shell literal that evaluates back
+// to s exactly. Embedded single quotes are escaped via the canonical
+// close-quote / backslash-quote / reopen-quote idiom (four characters).
+// Use whenever a substituted input value lands inside `sh -c <body>` so a
+// hostile value like `; rm -rf /` becomes the literal string
+// `'; rm -rf /'` rather than a fresh statement.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// sqlQuote returns a SQLite-quoted string literal: single-quoted, with
+// internal single quotes doubled. SQLite escapes an embedded single quote
+// inside a string literal by doubling it (two consecutive apostrophes),
+// not with a backslash. Use whenever a substituted input value lands
+// inside a sqlite3 SQL body so a value like
+// `'); DROP TABLE t; --` cannot close out the literal and append
+// arbitrary SQL.
+func sqlQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 // combineStderr returns stderr if non-empty, else falls back to stdout. Used
 // in the SubprocessError message when a step exits non-zero — many shell
 // scripts write diagnostics to stdout (e.g. `set -x` traces, or tools that
 // don't follow the convention), and the message field is more useful when
-// it carries *some* output than when it's blank.
+// it carries *some* output than when it's blank. Output is run through
+// redactStderr so token-shaped substrings (API keys, bearer tokens, signing
+// keys) never reach the bundle.
 func combineStderr(stdout, stderr string) string {
 	if stderr != "" {
-		return stderr
+		return redactStderr([]byte(stderr))
 	}
-	return stdout
+	return redactStderr([]byte(stdout))
+}
+
+// stderrMaxBytes is the cap applied by redactStderr. Long enough to keep
+// a stack trace useful, short enough to keep the bundle compact.
+const stderrMaxBytes = 4096
+
+// tokenLike matches a contiguous run of token-shaped characters of length
+// >= 32 (alphanumerics plus `_` and `-`). Tuned to catch API keys, bearer
+// tokens, base64-encoded signing material, and similar; deliberately loose
+// enough to over-redact rather than under-redact.
+var tokenLike = regexp.MustCompile(`[A-Za-z0-9_-]{32,}`)
+
+// redactStderr truncates b to stderrMaxBytes (with a `…[truncated]` marker
+// when bytes were dropped) and replaces every token-shaped substring with
+// `<redacted-token>`. Used everywhere stderr from a child subprocess is
+// folded into an error message that may end up in the signed bundle.
+func redactStderr(b []byte) string {
+	if len(b) > stderrMaxBytes {
+		b = append([]byte(nil), b[:stderrMaxBytes]...)
+		b = append(b, []byte("…[truncated]")...)
+	}
+	return tokenLike.ReplaceAllString(string(b), "<redacted-token>")
 }
