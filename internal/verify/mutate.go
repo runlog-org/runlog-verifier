@@ -36,6 +36,18 @@ func (k branchKind) String() string {
 	return "unknown"
 }
 
+// specKeys returns the schema-side differential keys for this branch's return
+// and raise specs. Centralised here so the three tier orchestrators (unit,
+// integration replay, integration reexecute) and classifyOutcome don't all
+// hand-roll the "failed_branch_must_return" / "working_branch_must_raise"
+// strings independently.
+func (k branchKind) specKeys() (retKey, raiseKey string) {
+	if k == branchFailed {
+		return "failed_branch_must_return", "failed_branch_must_raise"
+	}
+	return "working_branch_must_return", "working_branch_must_raise"
+}
+
 // parseBranchKind maps a schema-side branch key to its enum. ok is false for
 // unknown values (including ""), letting callers degrade gracefully.
 func parseBranchKind(s string) (branchKind, bool) {
@@ -473,13 +485,7 @@ func classifyOutcome(k branchKind, got, baseline runner.ExecResult, diff map[str
 	if execResultsEqual(got, baseline) {
 		return outcomeUnchanged
 	}
-	var retKey, raiseKey string
-	if k == branchFailed {
-		retKey, raiseKey = "failed_branch_must_return", "failed_branch_must_raise"
-	} else {
-		retKey, raiseKey = "working_branch_must_return", "working_branch_must_raise"
-	}
-	if reasons := matchOutcome(k.String(), got, diff, retKey, raiseKey); len(reasons) > 0 {
+	if reasons := matchOutcome(k, got, diff); len(reasons) > 0 {
 		return outcomeFail
 	}
 	return outcomePass

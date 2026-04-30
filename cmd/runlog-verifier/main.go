@@ -170,24 +170,7 @@ func runVerify(args []string) int {
 	// Capture the host fingerprint regardless of outcome — the platform
 	// uses it to attribute environment-correlated failures even on
 	// rejected entries.
-	fp := fingerprint.Capture()
-	fpMap := map[string]string{
-		"os":          fp.OS,
-		"arch":        fp.Arch,
-		"go_version":  fp.GoVersion,
-		"git_commit":  fp.GitCommit,
-		"captured_at": fp.CapturedAt,
-	}
-	if fp.GitAvailable {
-		fpMap["git_available"] = "true"
-	} else {
-		fpMap["git_available"] = "false"
-	}
-	if fp.GitDirty {
-		fpMap["git_dirty"] = "true"
-	} else {
-		fpMap["git_dirty"] = "false"
-	}
+	fpMap := fingerprint.Capture().AsMap()
 
 	// Load the persistent keypair registered with the server. Refuse to
 	// fall back to an ephemeral key — the server-side signature check
@@ -223,7 +206,7 @@ func runVerify(args []string) int {
 		return 2
 	}
 
-	out := map[string]interface{}{
+	out := map[string]any{
 		"status":      signed.Bundle.Status,
 		"unit_id":     signed.Bundle.UnitID,
 		"tier":        signed.Bundle.Tier,

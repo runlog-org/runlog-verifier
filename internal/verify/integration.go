@@ -237,12 +237,10 @@ func runIntegration(e *Entry) Result {
 	// ── Outcome matching ──────────────────────────────────────────────
 	var reasons []Reason
 	if failedHasRun {
-		reasons = append(reasons, matchOutcome("failed_approach", failedRes,
-			e.Verification.Differential, "failed_branch_must_return", "failed_branch_must_raise")...)
+		reasons = append(reasons, matchOutcome(branchFailed, failedRes, e.Verification.Differential)...)
 	}
 	if workingHasRun {
-		reasons = append(reasons, matchOutcome("working_approach", workingRes,
-			e.Verification.Differential, "working_branch_must_return", "working_branch_must_raise")...)
+		reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
 	}
 	if len(reasons) > 0 {
 		res.Status = "rejected"

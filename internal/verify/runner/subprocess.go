@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -463,13 +464,7 @@ func substituteVars(s string, inputs map[string]any, quote func(string) string) 
 		}
 	}
 	// Sort by length descending so $DB_PATH_SUFFIX is replaced before $DB_PATH.
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if len(keys[j]) > len(keys[i]) {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
+	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
 	for _, k := range keys {
 		raw := fmt.Sprintf("%v", inputs[k])
 		s = strings.ReplaceAll(s, k, quote(raw))

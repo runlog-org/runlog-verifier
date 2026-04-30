@@ -35,6 +35,31 @@ type Print struct {
 // captureGit is the path used to locate git. Overrideable in tests.
 var captureGit = func() (string, error) { return exec.LookPath("git") }
 
+// AsMap renders the fingerprint as the map[string]string the signed bundle
+// expects. Booleans are stringified to "true"/"false" so the value type stays
+// uniform across all keys — Bundle.Fingerprint is map[string]string so the
+// signature canonicalisation doesn't need a heterogeneous-value pass. Callers
+// in cmd/ that want to embed the fingerprint into a sign.Bundle should pass
+// AsMap() directly.
+func (p Print) AsMap() map[string]string {
+	return map[string]string{
+		"os":            p.OS,
+		"arch":          p.Arch,
+		"go_version":    p.GoVersion,
+		"git_commit":    p.GitCommit,
+		"captured_at":   p.CapturedAt,
+		"git_available": boolStr(p.GitAvailable),
+		"git_dirty":     boolStr(p.GitDirty),
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
 // Capture collects the current environment. Git fields are populated
 // via exec("git ..."); if git is not installed or the working directory
 // is not a repository, GitAvailable is set to false and the remaining

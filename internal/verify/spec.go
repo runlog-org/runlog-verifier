@@ -12,7 +12,14 @@ import (
 
 // matchOutcome compares one branch's ExecResult against the relevant
 // differential keys. Returns the (possibly empty) list of mismatch reasons.
-func matchOutcome(branch string, got runner.ExecResult, diff map[string]any, retKey, raiseKey string) []Reason {
+//
+// The per-branch return/raise spec keys are derived from k.specKeys() so the
+// schema-side strings ("failed_branch_must_return", …) live in exactly one
+// place — formerly duplicated across runUnit, runIntegration, runReexecute,
+// and classifyOutcome.
+func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Reason {
+	branch := k.String()
+	retKey, raiseKey := k.specKeys()
 	retSpec, hasRet := diff[retKey]
 	raiseSpec, hasRaise := diff[raiseKey]
 
