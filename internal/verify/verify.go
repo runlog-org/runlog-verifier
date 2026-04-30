@@ -72,15 +72,10 @@ func Run(data []byte) (Result, error) {
 
 	default:
 		// Unknown tier — accepted as well-formed YAML but not executable.
-		res.Status = "tier_unsupported"
-		res.Reasons = []Reason{{
-			Code: "tier_not_yet_implemented",
-			Message: fmt.Sprintf(
-				"verification tier %q is not implemented in this verifier build",
-				tier,
-			),
-		}}
-		return res, nil
+		return tierUnsupported(res, "tier_not_yet_implemented", fmt.Sprintf(
+			"verification tier %q is not implemented in this verifier build",
+			tier,
+		)), nil
 	}
 }
 

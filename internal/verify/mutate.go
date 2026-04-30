@@ -277,6 +277,57 @@ func iterateMutations(e *Entry, runOne func(m Mutation, i int) ([]Reason, bool))
 	return reasons, supported
 }
 
+// forEachMutationBranch walks the per-branch targets of one mutation and
+// dispatches the tier-specific body via run for each runnable branch. The
+// shared prologue (no-expectation guard, inapplicable skip, unknown-branch
+// guard) was identical across runOneMutation, runOneIntegrationMutation, and
+// runOneReexecuteMutation; centralising it here means the per-tier bodies
+// only carry the tier-specific re-run mechanics.
+//
+// run is called with (branch, baseline, expected) once per branch that has a
+// declared expectation and a registered baseline. Reasons returned by run are
+// concatenated in branch order.
+func forEachMutationBranch(
+	m Mutation,
+	idx int,
+	b mutationBaseline,
+	run func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason,
+) []Reason {
+	var reasons []Reason
+	for _, branch := range branchesFor(m) {
+		expected, inapplicable, hasExp := expectedOutcomeFor(m, branch)
+		if !hasExp {
+			// CLI-path defensive check: the schema's oneOf gate enforces
+			// "at least one of expected_result / expected_branch_outcome",
+			// but not the per-branch case where expected_branch_outcome is
+			// declared but the targeted branch is missing from the map.
+			// Surface that as a real authoring bug rather than a silent skip
+			// (which would let the entry verify green without ever running
+			// the mutation against the targeted branch).
+			reasons = append(reasons, Reason{
+				Code: "mutation_no_expectation",
+				Message: fmt.Sprintf(
+					"mutation #%d targets %s but declares no expected_result and no expected_branch_outcome.%s",
+					idx+1, branch, branch),
+			})
+			continue
+		}
+		if inapplicable {
+			continue
+		}
+		baseline, ok := b.byBranch(branch)
+		if !ok {
+			reasons = append(reasons, Reason{
+				Code:    "mutation_unknown_branch",
+				Message: fmt.Sprintf("mutation #%d targets unknown branch %q", idx+1, branch),
+			})
+			continue
+		}
+		reasons = append(reasons, run(branch, baseline, expected)...)
+	}
+	return reasons
+}
+
 // runOneMutation applies mutation m (1-indexed via idx) to each target
 // branch, re-runs that branch, classifies the outcome, and compares to the
 // declared expectation. The bool return is false when the strategy is not
@@ -293,49 +344,14 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 		}}, false
 	}
 
-	var reasons []Reason
-
-	for _, branch := range branchesFor(m) {
-		expected, inapplicable, hasExp := expectedOutcomeFor(m, branch)
-		if !hasExp {
-			// CLI-path defensive check: the schema's oneOf gate enforces
-			// "at least one of expected_result / expected_branch_outcome",
-			// but not the per-branch case where expected_branch_outcome is
-			// declared but the targeted branch is missing from the map.
-			// Surface that as a real authoring bug rather than a silent skip
-			// (which would let the entry verify green without ever running
-			// the mutation against the targeted branch).
-			reasons = append(reasons, Reason{
-				Code: "mutation_no_expectation",
-				Message: fmt.Sprintf(
-					"mutation #%d targets %s but declares no expected_result and no expected_branch_outcome.%s",
-					idx+1, branch, branch,
-				),
-			})
-			continue
-		}
-		if inapplicable {
-			continue
-		}
-
-		baseline, ok := b.byBranch(branch)
-		if !ok {
-			reasons = append(reasons, Reason{
-				Code: "mutation_unknown_branch",
-				Message: fmt.Sprintf("mutation #%d targets unknown branch %q",
-					idx+1, branch),
-			})
-			continue
-		}
-
+	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
 		mutInputs, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
-			reasons = append(reasons, Reason{
+			return []Reason{{
 				Code: "mutation_target_invalid",
 				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
 					idx+1, m.Strategy, branch, err),
-			})
-			continue
+			}}
 		}
 
 		// Use the per-branch driver when set (F18+F23 path); fall back to
@@ -348,13 +364,12 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 		}
 		got, err := drv.Run(baseline.Setup, mutAction, mutInputs, b.Timeout)
 		if err != nil {
-			if errors.Is(err, runner.ErrTimeout) || errors.Is(err, runner.ErrInterpreterMissing) {
-				reasons = append(reasons, Reason{
+			if isEnvErr(err) {
+				return []Reason{{
 					Code: "mutation_runner_error",
 					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
 						idx+1, m.Strategy, branch, err),
-				})
-				continue
+				}}
 			}
 			// Generic subprocess crash (SyntaxError after a remove mutation,
 			// runtime segfault, OOM kill). Treat as the test failing —
@@ -368,39 +383,39 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 		}
 
 		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
-		if actual != expected {
-			// Diagnostic refinement: when a source-mutating strategy
-			// rewrote the action (so the regex / strings.ReplaceAll did
-			// match) but the program's observable behaviour was
-			// identical, the submitter picked a token that doesn't
-			// actually discriminate — typically a local identifier
-			// that's renamed consistently throughout, or a call that
-			// has the same return value as the swap target. Replace
-			// the generic mutation_outcome_mismatch reason with a
-			// targeted hint so the seed author knows what to fix.
-			if expected == outcomeFail &&
-				actual == outcomeUnchanged &&
-				discriminatingStrategies[m.Strategy] &&
-				!stepBodiesEqual(baseline.Action, mutAction) {
-				token, _ := resolveSwapToken(m)
-				reasons = append(reasons, Reason{
-					Code: "mutation_did_not_discriminate",
-					Message: fmt.Sprintf(
-						"mutation #%d (%s) on %s: rewrote source but produced no behavioural change. "+
-							"The token %q was substituted in the action source but the program's observable "+
-							"output was byte-identical to the baseline. Pick a token that actually discriminates "+
-							"(a literal value, a function name with side effects, or a flag).",
-						idx+1, m.Strategy, branch, token),
-				})
-				continue
-			}
-			reasons = append(reasons, Reason{
-				Code: "mutation_outcome_mismatch",
-				Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
-					idx+1, m.Strategy, branch, expected, actual),
-			})
+		if actual == expected {
+			return nil
 		}
-	}
+		// Diagnostic refinement: when a source-mutating strategy
+		// rewrote the action (so the regex / strings.ReplaceAll did
+		// match) but the program's observable behaviour was
+		// identical, the submitter picked a token that doesn't
+		// actually discriminate — typically a local identifier
+		// that's renamed consistently throughout, or a call that
+		// has the same return value as the swap target. Replace
+		// the generic mutation_outcome_mismatch reason with a
+		// targeted hint so the seed author knows what to fix.
+		if expected == outcomeFail &&
+			actual == outcomeUnchanged &&
+			discriminatingStrategies[m.Strategy] &&
+			!stepBodiesEqual(baseline.Action, mutAction) {
+			token, _ := resolveSwapToken(m)
+			return []Reason{{
+				Code: "mutation_did_not_discriminate",
+				Message: fmt.Sprintf(
+					"mutation #%d (%s) on %s: rewrote source but produced no behavioural change. "+
+						"The token %q was substituted in the action source but the program's observable "+
+						"output was byte-identical to the baseline. Pick a token that actually discriminates "+
+						"(a literal value, a function name with side effects, or a flag).",
+					idx+1, m.Strategy, branch, token),
+			}}
+		}
+		return []Reason{{
+			Code: "mutation_outcome_mismatch",
+			Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
+				idx+1, m.Strategy, branch, expected, actual),
+		}}
+	})
 	return reasons, true
 }
 

@@ -127,18 +127,13 @@ func runIntegration(e *Entry) Result {
 	// other isolations (compiler, docker_daemon) are tier_unsupported until
 	// their drivers land regardless of mode.
 	if e.Verification.Isolation != "http_client" {
-		res.Status = "tier_unsupported"
-		res.Reasons = []Reason{{
-			Code: "isolation_not_yet_implemented",
-			Message: fmt.Sprintf(
-				"replay-mode integration isolation %q is not implemented — "+
-					"replay supports http_client only; subprocess + database "+
-					"under cassette.mode: reexecute; compiler / docker_daemon "+
-					"land in follow-up commits",
-				e.Verification.Isolation,
-			),
-		}}
-		return res
+		return tierUnsupported(res, "isolation_not_yet_implemented", fmt.Sprintf(
+			"replay-mode integration isolation %q is not implemented — "+
+				"replay supports http_client only; subprocess + database "+
+				"under cassette.mode: reexecute; compiler / docker_daemon "+
+				"land in follow-up commits",
+			e.Verification.Isolation,
+		))
 	}
 
 	// ── Branch step shape + path extractor + inputs ──────────────────
@@ -486,32 +481,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 		}
 	}
 
-	var reasons []Reason
-
-	for _, branch := range branchesFor(m) {
-		expected, inapplicable, hasExp := expectedOutcomeFor(m, branch)
-		if !hasExp {
-			reasons = append(reasons, Reason{
-				Code: "mutation_no_expectation",
-				Message: fmt.Sprintf(
-					"mutation #%d targets %s but declares no expected_result and no expected_branch_outcome.%s",
-					idx+1, branch, branch),
-			})
-			continue
-		}
-		if inapplicable {
-			continue
-		}
-
-		baseline, ok := b.byBranch(branch)
-		if !ok {
-			reasons = append(reasons, Reason{
-				Code:    "mutation_unknown_branch",
-				Message: fmt.Sprintf("mutation #%d targets unknown branch %q", idx+1, branch),
-			})
-			continue
-		}
-
+	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
 		var seq []string
 		switch branch {
 		case branchFailed:
@@ -523,13 +493,12 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 			// No replay sequence for this branch → no stub required, but
 			// mutation expects a re-run. Skip with a clear reason rather than
 			// silently passing.
-			reasons = append(reasons, Reason{
+			return []Reason{{
 				Code: "mutation_no_branch_sequence",
 				Message: fmt.Sprintf(
 					"mutation #%d targets %s but no %s_replay_sequence is declared",
 					idx+1, branch, branch),
-			})
-			continue
+			}}
 		}
 
 		// ── Per-mutation stub setup ───────────────────────────────────
@@ -547,11 +516,10 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 
 			perturbed, err := applyCassetteResponseMutation(ctx.cassette, m, seq)
 			if err != nil {
-				reasons = append(reasons, Reason{
+				return []Reason{{
 					Code:    err.code,
 					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v", idx+1, m.Strategy, branch, err.msg),
-				})
-				continue
+				}}
 			}
 			stubCassette = perturbed
 		} else {
@@ -559,12 +527,11 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 			var err error
 			mutInputs, mutAction, err = strat.apply(baseline, m)
 			if err != nil {
-				reasons = append(reasons, Reason{
+				return []Reason{{
 					Code: "mutation_target_invalid",
 					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
 						idx+1, m.Strategy, branch, err),
-				})
-				continue
+				}}
 			}
 		}
 
@@ -578,12 +545,11 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 			// Same crash-as-fail logic as runOneMutation: timeout/missing
 			// interpreter are environmental; everything else is a real fail.
 			if isEnvErr(err) {
-				reasons = append(reasons, Reason{
+				return []Reason{{
 					Code: "mutation_runner_error",
 					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
 						idx+1, m.Strategy, branch, err),
-				})
-				continue
+				}}
 			}
 			got = runner.ExecResult{
 				Raised:    true,
@@ -593,31 +559,31 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 		}
 
 		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
-		if actual != expected {
-			// F22: mirror the F21 hint for cassette-response mutations.
-			// A perturbed cassette that produces no behavioural change is
-			// integration-tier theatre — the action ignored the response
-			// field the submitter perturbed.
-			if cassetteResponse &&
-				expected == outcomeFail &&
-				actual == outcomeUnchanged {
-				reasons = append(reasons, Reason{
-					Code: "mutation_did_not_discriminate",
-					Message: fmt.Sprintf(
-						"mutation #%d (%s) on %s: perturbed cassette response (target=%q field=%s) but produced no behavioural change. "+
-							"The action did not consult the perturbed response field — pick a field the action actually reads, "+
-							"or assert expected_result: unchanged if this tolerance is the claim.",
-						idx+1, m.Strategy, branch, m.Target, mutationField(m)),
-				})
-				continue
-			}
-			reasons = append(reasons, Reason{
-				Code: "mutation_outcome_mismatch",
-				Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
-					idx+1, m.Strategy, branch, expected, actual),
-			})
+		if actual == expected {
+			return nil
 		}
-	}
+		// F22: mirror the F21 hint for cassette-response mutations.
+		// A perturbed cassette that produces no behavioural change is
+		// integration-tier theatre — the action ignored the response
+		// field the submitter perturbed.
+		if cassetteResponse &&
+			expected == outcomeFail &&
+			actual == outcomeUnchanged {
+			return []Reason{{
+				Code: "mutation_did_not_discriminate",
+				Message: fmt.Sprintf(
+					"mutation #%d (%s) on %s: perturbed cassette response (target=%q field=%s) but produced no behavioural change. "+
+						"The action did not consult the perturbed response field — pick a field the action actually reads, "+
+						"or assert expected_result: unchanged if this tolerance is the claim.",
+					idx+1, m.Strategy, branch, m.Target, mutationField(m)),
+			}}
+		}
+		return []Reason{{
+			Code: "mutation_outcome_mismatch",
+			Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
+				idx+1, m.Strategy, branch, expected, actual),
+		}}
+	})
 	return reasons, true
 }
 

@@ -89,17 +89,12 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	res := Result{UnitID: e.UnitID, Tier: "integration"}
 
 	if !reexecuteSupportedIsolations[e.Verification.Isolation] {
-		res.Status = "tier_unsupported"
-		res.Reasons = []Reason{{
-			Code: "isolation_not_yet_implemented",
-			Message: fmt.Sprintf(
-				"reexecute-mode isolation %q is not implemented in this verifier "+
-					"build — subprocess + database (sqlite) ship first; "+
-					"compiler / docker_daemon land in follow-up commits",
-				e.Verification.Isolation,
-			),
-		}}
-		return res
+		return tierUnsupported(res, "isolation_not_yet_implemented", fmt.Sprintf(
+			"reexecute-mode isolation %q is not implemented in this verifier "+
+				"build — subprocess + database (sqlite) ship first; "+
+				"compiler / docker_daemon land in follow-up commits",
+			e.Verification.Isolation,
+		))
 	}
 
 	if cas.Runtime == nil {
@@ -110,17 +105,12 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 			"cassette.mode: reexecute requires cassette.runtime.tool")
 	}
 	if !reexecuteSupportedTools[cas.Runtime.Tool] {
-		res.Status = "tier_unsupported"
-		res.Reasons = []Reason{{
-			Code: "runtime_tool_not_yet_implemented",
-			Message: fmt.Sprintf(
-				"cassette.runtime.tool %q is not implemented in this verifier "+
-					"build — shell + sqlite ship first; postgres / redis / git / "+
-					"docker land in follow-up commits",
-				cas.Runtime.Tool,
-			),
-		}}
-		return res
+		return tierUnsupported(res, "runtime_tool_not_yet_implemented", fmt.Sprintf(
+			"cassette.runtime.tool %q is not implemented in this verifier "+
+				"build — shell + sqlite ship first; postgres / redis / git / "+
+				"docker land in follow-up commits",
+			cas.Runtime.Tool,
+		))
 	}
 
 	// ── Branch step shape + inputs ────────────────────────────────────
@@ -336,40 +326,14 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 		}}, false
 	}
 
-	var reasons []Reason
-
-	for _, branch := range branchesFor(m) {
-		expected, inapplicable, hasExp := expectedOutcomeFor(m, branch)
-		if !hasExp {
-			reasons = append(reasons, Reason{
-				Code: "mutation_no_expectation",
-				Message: fmt.Sprintf(
-					"mutation #%d targets %s but declares no expected_result and no expected_branch_outcome.%s",
-					idx+1, branch, branch),
-			})
-			continue
-		}
-		if inapplicable {
-			continue
-		}
-
-		baseline, ok := b.byBranch(branch)
-		if !ok {
-			reasons = append(reasons, Reason{
-				Code:    "mutation_unknown_branch",
-				Message: fmt.Sprintf("mutation #%d targets unknown branch %q", idx+1, branch),
-			})
-			continue
-		}
-
+	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
 		mutInputs, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
-			reasons = append(reasons, Reason{
+			return []Reason{{
 				Code: "mutation_target_invalid",
 				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
 					idx+1, m.Strategy, branch, err),
-			})
-			continue
+			}}
 		}
 
 		// ── Per-mutation fresh sandbox ────────────────────────────────
@@ -378,7 +342,7 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 		// the end of *this* mutation. A function-scope `defer` would
 		// accumulate across iterations and keep N tmpdirs + teardown_script
 		// processes live until the whole mutation loop returned.
-		mutReasons := func() []Reason {
+		return func() []Reason {
 			got, mutDriver, runReason := runReexecuteBranch(
 				fmt.Sprintf("mutation #%d (%s) on %s", idx+1, m.Strategy, branch),
 				cas, baseline.Setup, mutAction, mutInputs, b.Timeout)
@@ -429,7 +393,6 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 					idx+1, m.Strategy, branch, expected, actual),
 			}}
 		}()
-		reasons = append(reasons, mutReasons...)
-	}
+	})
 	return reasons, true
 }

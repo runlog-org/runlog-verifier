@@ -47,30 +47,20 @@ func runUnit(e *Entry) Result {
 	driver, registered := runner.DriverFor(iso)
 	if !registered {
 		if schemaIsolations[iso] {
-			res.Status = "tier_unsupported"
-			res.Reasons = []Reason{{
-				Code: "isolation_unsupported",
-				Message: fmt.Sprintf(
-					"isolation %q is recognised by the schema but not implemented "+
-						"in this verifier build — function isolation ships first; "+
-						"subprocess / compiler / database / http_client / "+
-						"docker_daemon land in follow-up commits",
-					iso,
-				),
-			}}
-			return res
-		}
-		res.Status = "tier_unsupported"
-		res.Reasons = []Reason{{
-			Code: "isolation_unknown",
-			Message: fmt.Sprintf(
-				"isolation %q is not in the schema enum — accepted values are "+
-					"function, subprocess, compiler, database, http_client, "+
-					"docker_daemon",
+			return tierUnsupported(res, "isolation_unsupported", fmt.Sprintf(
+				"isolation %q is recognised by the schema but not implemented "+
+					"in this verifier build — function isolation ships first; "+
+					"subprocess / compiler / database / http_client / "+
+					"docker_daemon land in follow-up commits",
 				iso,
-			),
-		}}
-		return res
+			))
+		}
+		return tierUnsupported(res, "isolation_unknown", fmt.Sprintf(
+			"isolation %q is not in the schema enum — accepted values are "+
+				"function, subprocess, compiler, database, http_client, "+
+				"docker_daemon",
+			iso,
+		))
 	}
 
 	prep, reason := prepareBranches(e, true)
@@ -142,35 +132,33 @@ func rejected(res Result, code, message string) Result {
 	return res
 }
 
+// tierUnsupported fills res with a single tier_unsupported reason and returns
+// it. Mirrors the rejected() helper for the tier_unsupported status, which is
+// the verifier's "well-formed but not implemented in this build" outcome —
+// distinct from rejected (entry violated a check) and verified (passed). Used
+// by every tier orchestrator (unit/integration replay/integration reexecute)
+// when a schema-recognised value (isolation, runtime tool, tier) has no driver
+// in this build.
+func tierUnsupported(res Result, code, message string) Result {
+	res.Status = "tier_unsupported"
+	res.Reasons = []Reason{{Code: code, Message: message}}
+	return res
+}
+
 // runnerError maps a runner error to a verifier outcome. Interpreter or
 // language unsupported degrade to tier_unsupported (the submitter cannot
 // fix the entry to verify on this host); other errors are rejection.
 func runnerError(res Result, branch string, err error) Result {
 	switch {
 	case errors.Is(err, runner.ErrInterpreterMissing):
-		res.Status = "tier_unsupported"
-		res.Reasons = []Reason{{
-			Code:    "runtime_unavailable",
-			Message: fmt.Sprintf("python3 is not installed on the verifier host (running %s): %v", branch, err),
-		}}
+		return tierUnsupported(res, "runtime_unavailable",
+			fmt.Sprintf("python3 is not installed on the verifier host (running %s): %v", branch, err))
 	case errors.Is(err, runner.ErrLanguageUnsupported):
-		res.Status = "tier_unsupported"
-		res.Reasons = []Reason{{
-			Code:    "language_not_yet_implemented",
-			Message: fmt.Sprintf("%s: %v", branch, err),
-		}}
+		return tierUnsupported(res, "language_not_yet_implemented",
+			fmt.Sprintf("%s: %v", branch, err))
 	case errors.Is(err, runner.ErrTimeout):
-		res.Status = "rejected"
-		res.Reasons = []Reason{{
-			Code:    "branch_timeout",
-			Message: fmt.Sprintf("%s: %v", branch, err),
-		}}
+		return rejected(res, "branch_timeout", fmt.Sprintf("%s: %v", branch, err))
 	default:
-		res.Status = "rejected"
-		res.Reasons = []Reason{{
-			Code:    "branch_runner_error",
-			Message: fmt.Sprintf("%s: %v", branch, err),
-		}}
+		return rejected(res, "branch_runner_error", fmt.Sprintf("%s: %v", branch, err))
 	}
-	return res
 }
