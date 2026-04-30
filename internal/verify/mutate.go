@@ -240,6 +240,23 @@ func supportedStrategiesMessage() string {
 	return strings.Join(names, ", ")
 }
 
+// strategyUnsupportedReason builds the canonical "strategy not yet
+// implemented; supported in this build: …" mutation_strategy_unsupported
+// reason. The same 6-line block formerly lived inline in runOneMutation,
+// runOneIntegrationMutation, and runOneReexecuteMutation; centralising it
+// here means the message format and the supported-list rendering live
+// together. Returned as a single-element slice for symmetry with the
+// per-mutation runner contract (which always returns a []Reason).
+func strategyUnsupportedReason(idx int, strategyName string) []Reason {
+	return []Reason{{
+		Code: "mutation_strategy_unsupported",
+		Message: fmt.Sprintf(
+			"mutation #%d strategy %q is not yet implemented; supported in this build: %s",
+			idx+1, strategyName, supportedStrategiesMessage(),
+		),
+	}}
+}
+
 // runMutations applies each declared mutation and verifies the actual outcome
 // matches the declared expectation. Returns (reasons, supported).
 //
@@ -335,13 +352,7 @@ func forEachMutationBranch(
 func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason, bool) {
 	strat, ok := strategies[m.Strategy]
 	if !ok {
-		return []Reason{{
-			Code: "mutation_strategy_unsupported",
-			Message: fmt.Sprintf(
-				"mutation #%d strategy %q is not yet implemented; supported in this build: %s",
-				idx+1, m.Strategy, supportedStrategiesMessage(),
-			),
-		}}, false
+		return strategyUnsupportedReason(idx, m.Strategy), false
 	}
 
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {

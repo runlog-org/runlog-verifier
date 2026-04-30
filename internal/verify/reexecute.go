@@ -119,9 +119,7 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	// dotted-key dict path extraction does not apply.
 	prep, prepReason := prepareBranches(e, false)
 	if prepReason != nil {
-		res.Status = "rejected"
-		res.Reasons = []Reason{*prepReason}
-		return res
+		return rejectedReasons(res, []Reason{*prepReason})
 	}
 	failedSetup, failedAction := prep.FailedSetup, prep.FailedAction
 	workingSetup, workingAction := prep.WorkingSetup, prep.WorkingAction
@@ -133,9 +131,7 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	failedRes, failedDriver, failedReason := runReexecuteBranch(
 		"failed_approach", cas, failedSetup, failedAction, failedInputs, timeout)
 	if failedReason != nil {
-		res.Status = "rejected"
-		res.Reasons = []Reason{*failedReason}
-		return res
+		return rejectedReasons(res, []Reason{*failedReason})
 	}
 	defer cleanupReexecuteSandbox(failedDriver, cas, failedInputs, timeout)
 
@@ -143,9 +139,7 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	workingRes, workingDriver, workingReason := runReexecuteBranch(
 		"working_approach", cas, workingSetup, workingAction, workingInputs, timeout)
 	if workingReason != nil {
-		res.Status = "rejected"
-		res.Reasons = []Reason{*workingReason}
-		return res
+		return rejectedReasons(res, []Reason{*workingReason})
 	}
 	defer cleanupReexecuteSandbox(workingDriver, cas, workingInputs, timeout)
 
@@ -154,9 +148,7 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	reasons = append(reasons, matchOutcome(branchFailed, failedRes, e.Verification.Differential)...)
 	reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
 	if len(reasons) > 0 {
-		res.Status = "rejected"
-		res.Reasons = reasons
-		return res
+		return rejectedReasons(res, reasons)
 	}
 
 	// ── Mutation testing ──────────────────────────────────────────────
@@ -181,14 +173,10 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 
 	mutReasons, supported := runReexecuteMutations(e, baseline, cas)
 	if !supported {
-		res.Status = "tier_unsupported"
-		res.Reasons = mutReasons
-		return res
+		return tierUnsupportedReasons(res, mutReasons)
 	}
 	if len(mutReasons) > 0 {
-		res.Status = "rejected"
-		res.Reasons = mutReasons
-		return res
+		return rejectedReasons(res, mutReasons)
 	}
 
 	res.Status = "verified"
@@ -317,13 +305,7 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 	}
 	strat, ok := strategies[m.Strategy]
 	if !ok {
-		return []Reason{{
-			Code: "mutation_strategy_unsupported",
-			Message: fmt.Sprintf(
-				"mutation #%d strategy %q is not yet implemented; supported in this build: %s",
-				idx+1, m.Strategy, supportedStrategiesMessage(),
-			),
-		}}, false
+		return strategyUnsupportedReason(idx, m.Strategy), false
 	}
 
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {

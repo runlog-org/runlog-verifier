@@ -65,9 +65,7 @@ func runUnit(e *Entry) Result {
 
 	prep, reason := prepareBranches(e, true)
 	if reason != nil {
-		res.Status = "rejected"
-		res.Reasons = []Reason{*reason}
-		return res
+		return rejectedReasons(res, []Reason{*reason})
 	}
 
 	timeout := e.Verification.TimeoutSeconds
@@ -86,9 +84,7 @@ func runUnit(e *Entry) Result {
 	reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
 
 	if len(reasons) > 0 {
-		res.Status = "rejected"
-		res.Reasons = reasons
-		return res
+		return rejectedReasons(res, reasons)
 	}
 
 	baseline := mutationBaseline{
@@ -111,14 +107,10 @@ func runUnit(e *Entry) Result {
 	}
 	mutReasons, supported := runMutations(e, baseline)
 	if !supported {
-		res.Status = "tier_unsupported"
-		res.Reasons = mutReasons
-		return res
+		return tierUnsupportedReasons(res, mutReasons)
 	}
 	if len(mutReasons) > 0 {
-		res.Status = "rejected"
-		res.Reasons = mutReasons
-		return res
+		return rejectedReasons(res, mutReasons)
 	}
 
 	res.Status = "verified"
@@ -127,8 +119,18 @@ func runUnit(e *Entry) Result {
 
 // rejected fills res with a single rejected reason and returns it.
 func rejected(res Result, code, message string) Result {
+	return rejectedReasons(res, []Reason{{Code: code, Message: message}})
+}
+
+// rejectedReasons fills res with a pre-built list of rejection reasons and
+// returns it. Multi-reason callers (every tier orchestrator after a
+// prepareBranches / matchOutcome / mutation aggregation) shared the same
+// `res.Status = "rejected"; res.Reasons = X; return res` triple inline; this
+// helper centralises that triple so the rejected() singleton case and the
+// multi-reason case use the same status string in exactly one place.
+func rejectedReasons(res Result, reasons []Reason) Result {
 	res.Status = "rejected"
-	res.Reasons = []Reason{{Code: code, Message: message}}
+	res.Reasons = reasons
 	return res
 }
 
@@ -140,8 +142,17 @@ func rejected(res Result, code, message string) Result {
 // when a schema-recognised value (isolation, runtime tool, tier) has no driver
 // in this build.
 func tierUnsupported(res Result, code, message string) Result {
+	return tierUnsupportedReasons(res, []Reason{{Code: code, Message: message}})
+}
+
+// tierUnsupportedReasons mirrors rejectedReasons for the tier_unsupported
+// status: the unsupported-strategy branch in each tier's mutation orchestrator
+// surfaces a list of mutation reasons (because iterateMutations may have
+// already aggregated reasons from earlier mutations before short-circuiting on
+// supported=false). Keeps the status string in one place.
+func tierUnsupportedReasons(res Result, reasons []Reason) Result {
 	res.Status = "tier_unsupported"
-	res.Reasons = []Reason{{Code: code, Message: message}}
+	res.Reasons = reasons
 	return res
 }
 

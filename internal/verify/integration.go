@@ -139,9 +139,7 @@ func runIntegration(e *Entry) Result {
 	// ── Branch step shape + path extractor + inputs ──────────────────
 	prep, prepReason := prepareBranches(e, true)
 	if prepReason != nil {
-		res.Status = "rejected"
-		res.Reasons = []Reason{*prepReason}
-		return res
+		return rejectedReasons(res, []Reason{*prepReason})
 	}
 	failedSetup, failedAction := prep.FailedSetup, prep.FailedAction
 	workingSetup, workingAction := prep.WorkingSetup, prep.WorkingAction
@@ -162,14 +160,10 @@ func runIntegration(e *Entry) Result {
 				"failed_approach_replay_sequence / working_approach_replay_sequence")
 	}
 	if reasons := validateSequenceNames(cas, failedSeq, "failed_approach_replay_sequence"); len(reasons) > 0 {
-		res.Status = "rejected"
-		res.Reasons = reasons
-		return res
+		return rejectedReasons(res, reasons)
 	}
 	if reasons := validateSequenceNames(cas, workingSeq, "working_approach_replay_sequence"); len(reasons) > 0 {
-		res.Status = "rejected"
-		res.Reasons = reasons
-		return res
+		return rejectedReasons(res, reasons)
 	}
 
 	timeout := e.Verification.TimeoutSeconds
@@ -194,9 +188,7 @@ func runIntegration(e *Entry) Result {
 			return runnerError(res, "failed_approach", runErr)
 		}
 		if len(rsns) > 0 {
-			res.Status = "rejected"
-			res.Reasons = rsns
-			return res
+			return rejectedReasons(res, rsns)
 		}
 		failedHasRun = true
 	}
@@ -215,18 +207,14 @@ func runIntegration(e *Entry) Result {
 			return runnerError(res, "working_approach", runErr)
 		}
 		if len(rsns) > 0 {
-			res.Status = "rejected"
-			res.Reasons = rsns
-			return res
+			return rejectedReasons(res, rsns)
 		}
 		workingHasRun = true
 	}
 
 	// ── Cassette-step coverage: every declared step must be hit ───────
 	if reasons := unusedStepReasons(cas, failedSeq, workingSeq); len(reasons) > 0 {
-		res.Status = "rejected"
-		res.Reasons = reasons
-		return res
+		return rejectedReasons(res, reasons)
 	}
 
 	// ── Outcome matching ──────────────────────────────────────────────
@@ -238,9 +226,7 @@ func runIntegration(e *Entry) Result {
 		reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
 	}
 	if len(reasons) > 0 {
-		res.Status = "rejected"
-		res.Reasons = reasons
-		return res
+		return rejectedReasons(res, reasons)
 	}
 
 	// ── Mutation testing ──────────────────────────────────────────────
@@ -276,14 +262,10 @@ func runIntegration(e *Entry) Result {
 	}
 	mutReasons, supported := runMutationsWithCtx(e, baseline, mutCtx)
 	if !supported {
-		res.Status = "tier_unsupported"
-		res.Reasons = mutReasons
-		return res
+		return tierUnsupportedReasons(res, mutReasons)
 	}
 	if len(mutReasons) > 0 {
-		res.Status = "rejected"
-		res.Reasons = mutReasons
-		return res
+		return rejectedReasons(res, mutReasons)
 	}
 
 	res.Status = "verified"
@@ -471,13 +453,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 
 	if !cassetteResponse {
 		if _, ok := strategies[m.Strategy]; !ok {
-			return []Reason{{
-				Code: "mutation_strategy_unsupported",
-				Message: fmt.Sprintf(
-					"mutation #%d strategy %q is not yet implemented; supported in this build: %s",
-					idx+1, m.Strategy, supportedStrategiesMessage(),
-				),
-			}}, false
+			return strategyUnsupportedReason(idx, m.Strategy), false
 		}
 	}
 

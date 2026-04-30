@@ -97,7 +97,5 @@ func runAssertionOnly(e *Entry) Result {
 		res.Status = "verified"
 		return res
 	}
-	res.Status = "rejected"
-	res.Reasons = reasons
-	return res
+	return rejectedReasons(res, reasons)
 }
