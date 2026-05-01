@@ -193,11 +193,11 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 // ExecResult, the driver instance (for teardown + mutation re-runs), and a
 // non-nil Reason if any pre-action step failed.
 //
-// The sandbox is *not* cleaned up here — the caller defers cleanupReexecuteSandbox
-// after both branches succeed so that a panic mid-run still triggers
-// teardown. Call sites that bail early (e.g. on a Reason) MUST cleanupReexecuteSandbox
-// explicitly first; that's the case the leftover defer in runReexecute
-// covers when both branches succeed.
+// The sandbox is *not* cleaned up here on success — the caller defers
+// cleanupReexecuteSandbox after both branches succeed so that a panic
+// mid-run still triggers teardown. On every error return,
+// cleanupReexecuteSandbox is called immediately so the teardown sequence
+// stays in one place rather than being duplicated at each error site.
 func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action []runner.Step, inputs map[string]any, timeout float64) (runner.ExecResult, runner.SubprocessDriver, *Reason) {
 	workdir, err := os.MkdirTemp("", "runlog-reexec-")
 	if err != nil {
@@ -210,10 +210,7 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 	driver := runner.SubprocessDriver{Tool: cas.Runtime.Tool, Workdir: workdir}
 
 	if err := driver.RunSetupScript(cas.SetupScript, inputs, timeout); err != nil {
-		// Best-effort teardown + remove on setup failure so we don't leak
-		// half-provisioned sandboxes when authoring goes wrong.
-		_ = driver.RunTeardownScript(cas.TeardownScript, inputs, timeout)
-		_ = os.RemoveAll(workdir)
+		cleanupReexecuteSandbox(driver, cas, inputs, timeout)
 
 		code := "setup_script_failed"
 		switch {
@@ -235,8 +232,7 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 		dbPath := filepath.Join(workdir, "db.sqlite")
 		if info, err := os.Lstat(dbPath); err == nil {
 			if info.Mode()&os.ModeSymlink != 0 {
-				_ = driver.RunTeardownScript(cas.TeardownScript, inputs, timeout)
-				_ = os.RemoveAll(workdir)
+				cleanupReexecuteSandbox(driver, cas, inputs, timeout)
 				r := Reason{
 					Code: "sandbox_symlink_rejected",
 					Message: fmt.Sprintf("%s: db.sqlite is a symlink; refusing to follow it",
@@ -249,8 +245,7 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 
 	res, err := driver.Run(setup, action, inputs, timeout)
 	if err != nil {
-		_ = driver.RunTeardownScript(cas.TeardownScript, inputs, timeout)
-		_ = os.RemoveAll(workdir)
+		cleanupReexecuteSandbox(driver, cas, inputs, timeout)
 
 		code := "branch_runner_error"
 		switch {
