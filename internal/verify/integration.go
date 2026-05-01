@@ -531,11 +531,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 						idx+1, m.Strategy, branch, err),
 				}}
 			}
-			got = runner.ExecResult{
-				Raised:    true,
-				Exception: "SubprocessError",
-				Message:   err.Error(),
-			}
+			got = synthesizeMutationCrash(err)
 		}
 
 		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
@@ -558,11 +554,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 					idx+1, m.Strategy, branch, m.Target, mutationField(m)),
 			}}
 		}
-		return []Reason{{
-			Code: "mutation_outcome_mismatch",
-			Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
-				idx+1, m.Strategy, branch, expected, actual),
-		}}
+		return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
 	})
 	return reasons, true
 }

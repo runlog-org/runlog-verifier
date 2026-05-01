@@ -364,21 +364,9 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 				actual == outcomeUnchanged &&
 				discriminatingStrategies[m.Strategy] &&
 				!stepBodiesEqual(baseline.Action, mutAction) {
-				token, _ := resolveSwapToken(m)
-				return []Reason{{
-					Code: "mutation_did_not_discriminate",
-					Message: fmt.Sprintf(
-						"mutation #%d (%s) on %s: rewrote source but produced no behavioural change. "+
-							"The token %q was substituted in the action source but the program's observable "+
-							"output was byte-identical to the baseline. Pick a token that actually discriminates.",
-						idx+1, m.Strategy, branch, token),
-				}}
+				return []Reason{mutationDidNotDiscriminateSourceReason(idx, m, branch)}
 			}
-			return []Reason{{
-				Code: "mutation_outcome_mismatch",
-				Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
-					idx+1, m.Strategy, branch, expected, actual),
-			}}
+			return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
 		}()
 	})
 	return reasons, true

@@ -345,6 +345,54 @@ func forEachMutationBranch(
 	return reasons
 }
 
+// synthesizeMutationCrash converts a non-env runner error into a synthesized
+// "raised exception" ExecResult so the existing outcome classifier produces
+// outcomeFail. Used when the mutation re-run crashed in a way that's
+// indistinguishable from the entry's claimed action raising — a remove
+// mutation that produces a SyntaxError, a runtime segfault, an OOM kill —
+// because the mutation-as-test framework treats those as "the mutated
+// program failed" rather than "the verifier host couldn't run the test".
+func synthesizeMutationCrash(err error) runner.ExecResult {
+	return runner.ExecResult{
+		Raised:    true,
+		Exception: "SubprocessError",
+		Message:   err.Error(),
+	}
+}
+
+// mutationOutcomeMismatchReason builds the canonical "expected X, got Y"
+// rejection for a mutation whose actual outcome diverged from the declared
+// expected. Used by every per-tier runOneMutation* dispatcher as the default
+// reason when the more-specific did_not_discriminate hint doesn't apply.
+func mutationOutcomeMismatchReason(idx int, m Mutation, branch branchKind, expected, actual mutationOutcome) Reason {
+	return Reason{
+		Code: "mutation_outcome_mismatch",
+		Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
+			idx+1, m.Strategy, branch, expected, actual),
+	}
+}
+
+// mutationDidNotDiscriminateSourceReason builds the source-mutation
+// non-discrimination hint used when a swap_function_call / swap_identifier /
+// remove_kwarg / drop_flag rewrote the action source but the program's
+// observable behaviour was byte-identical to the baseline. Caller is
+// responsible for the gating check (expected == outcomeFail, actual ==
+// outcomeUnchanged, discriminatingStrategies[m.Strategy], !stepBodiesEqual).
+// Integration-tier uses a different cassette-response variant of this hint
+// inline; this helper is only for the source-mutation form.
+func mutationDidNotDiscriminateSourceReason(idx int, m Mutation, branch branchKind) Reason {
+	token, _ := resolveSwapToken(m)
+	return Reason{
+		Code: "mutation_did_not_discriminate",
+		Message: fmt.Sprintf(
+			"mutation #%d (%s) on %s: rewrote source but produced no behavioural change. "+
+				"The token %q was substituted in the action source but the program's observable "+
+				"output was byte-identical to the baseline. Pick a token that actually discriminates "+
+				"(a literal value, a function name with side effects, or a flag).",
+			idx+1, m.Strategy, branch, token),
+	}
+}
+
 // runOneMutation applies mutation m (1-indexed via idx) to each target
 // branch, re-runs that branch, classifies the outcome, and compares to the
 // declared expectation. The bool return is false when the strategy is not
@@ -386,11 +434,7 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			// runtime segfault, OOM kill). Treat as the test failing —
 			// synthesize a raised ExecResult so the existing outcome
 			// classifier produces outcomeFail.
-			got = runner.ExecResult{
-				Raised:    true,
-				Exception: "SubprocessError",
-				Message:   err.Error(),
-			}
+			got = synthesizeMutationCrash(err)
 		}
 
 		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
@@ -410,22 +454,9 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			actual == outcomeUnchanged &&
 			discriminatingStrategies[m.Strategy] &&
 			!stepBodiesEqual(baseline.Action, mutAction) {
-			token, _ := resolveSwapToken(m)
-			return []Reason{{
-				Code: "mutation_did_not_discriminate",
-				Message: fmt.Sprintf(
-					"mutation #%d (%s) on %s: rewrote source but produced no behavioural change. "+
-						"The token %q was substituted in the action source but the program's observable "+
-						"output was byte-identical to the baseline. Pick a token that actually discriminates "+
-						"(a literal value, a function name with side effects, or a flag).",
-					idx+1, m.Strategy, branch, token),
-			}}
+			return []Reason{mutationDidNotDiscriminateSourceReason(idx, m, branch)}
 		}
-		return []Reason{{
-			Code: "mutation_outcome_mismatch",
-			Message: fmt.Sprintf("mutation #%d (%s) on %s: expected %s, got %s",
-				idx+1, m.Strategy, branch, expected, actual),
-		}}
+		return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
 	})
 	return reasons, true
 }
