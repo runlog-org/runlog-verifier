@@ -186,22 +186,21 @@ func checkAssertionOnlyShape(e *Entry) []Reason {
 }
 
 // validateTimeoutSeconds checks that e.Verification.TimeoutSeconds is in the
-// allowed range. The value 0 (or unset) is treated as "use driver default" —
-// callers such as runner/python.go and runner/subprocess.go already apply a
-// driver-defined default when the value is <= 0, so 0 is not an error. Only
-// explicitly negative values or values exceeding the 300-second cap are
-// rejected.
+// schema-mandated range. Per runlog-schema/entry.schema.yaml (exclusiveMinimum:
+// 0, maximum: 300), timeout_seconds must be in (0, 300]. Zero (unset) is NOT
+// accepted here: accepting 0 would codify the runner-side fallback as a
+// contract, which diverges from the schema. The runner-side defaults in
+// runner/python.go and runner/subprocess.go remain as a safety net for code
+// paths that bypass this helper, but no schema-valid entry can reach 0.
 //
-// Reason code: timeout_invalid (byte-stable for tooling).
+// Reason code: invalid_timeout.
 func validateTimeoutSeconds(e *Entry) *Reason {
 	ts := e.Verification.TimeoutSeconds
-	if ts < 0 || ts > 300 {
+	if ts <= 0 || ts > 300 {
 		r := Reason{
-			Code: "timeout_invalid",
+			Code: "invalid_timeout",
 			Message: fmt.Sprintf(
-				"timeout_seconds=%v is outside the allowed range — "+
-					"must be 0 (driver default) or in (0, 300]; "+
-					"negative values and values above 300 are rejected",
+				"timeout_seconds=%v is outside the schema range (0, 300]",
 				ts,
 			),
 		}
