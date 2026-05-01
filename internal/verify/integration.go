@@ -103,7 +103,7 @@ func isEnvErr(err error) bool {
 //
 // Each mode validates its own isolation set: replay accepts only `http_client`;
 // reexecute accepts `subprocess` + `database`. Mismatched (mode, isolation)
-// pairs surface as `isolation_not_yet_implemented` in the mode-specific
+// pairs surface as `isolation_unsupported` in the mode-specific
 // runner — they're not malformed per se (each value is in the schema enum),
 // just pointed at the wrong runtime path.
 func runIntegration(e *Entry) Result {
@@ -127,7 +127,7 @@ func runIntegration(e *Entry) Result {
 	// other isolations (compiler, docker_daemon) are tier_unsupported until
 	// their drivers land regardless of mode.
 	if e.Verification.Isolation != "http_client" {
-		return tierUnsupported(res, "isolation_not_yet_implemented", fmt.Sprintf(
+		return tierUnsupported(res, "isolation_unsupported", fmt.Sprintf(
 			"replay-mode integration isolation %q is not implemented — "+
 				"replay supports http_client only; subprocess + database "+
 				"under cassette.mode: reexecute; compiler / docker_daemon "+
@@ -144,6 +144,10 @@ func runIntegration(e *Entry) Result {
 	failedSetup, failedAction := prep.FailedSetup, prep.FailedAction
 	workingSetup, workingAction := prep.WorkingSetup, prep.WorkingAction
 	failedInputs, workingInputs := prep.FailedInputs, prep.WorkingInputs
+
+	if r := validateTimeoutSeconds(e); r != nil {
+		return rejectedReasons(res, []Reason{*r})
+	}
 
 	// ── Replay sequences (per docs/03 §5.4 and existing seed shape) ──
 	failedSeq, err := stringList(e.Verification.Differential, "failed_approach_replay_sequence")
@@ -587,17 +591,16 @@ func newCassetteMutationError(code, msg string) *cassetteMutationError {
 //
 //	strategy: mutate_cassette_response
 //	target:   <step_id>          # references a key in cassette.steps
-//	field:    body | status | header.<NAME>   # carried in m.Action (see
-//	                                            mutationField below)
+//	field:    body | status | header.<NAME>   # carried in m.Field (yaml:"action",
+//	                                            see mutationField below)
 //	new_value: <replacement>     # string for body/header.*; int|string for status
 //	branch:   failed_approach | working_approach   # required (cassette
 //	                                                   responses are per-branch
 //	                                                   in the v0.1 wire shape)
 //
-// The Mutation struct carries `field` in the existing `action` slot —
-// reusing the slot rather than expanding the wire shape keeps the
-// schema delta to one line. mutationField below is the canonical
-// extractor.
+// The Mutation struct carries the field selector in Mutation.Field (yaml tag
+// "action") — reusing the slot rather than expanding the wire shape keeps the
+// schema delta to one line. mutationField below is the canonical extractor.
 //
 // Validation:
 //   - target must name a declared cassette step, AND that step must appear in
@@ -642,7 +645,7 @@ func applyCassetteResponseMutation(c *cassette.Cassette, m Mutation, branchSeq [
 	if field == "" {
 		return nil, newCassetteMutationError("mutation_field_invalid",
 			"mutate_cassette_response requires field: body | status | header.<NAME> "+
-				"(carried in the mutation's `action` field)")
+				"(carried in the mutation's `action` YAML key / Mutation.Field)")
 	}
 
 	clone := c.Clone()
@@ -692,11 +695,11 @@ func applyCassetteResponseMutation(c *cassette.Cassette, m Mutation, branchSeq [
 }
 
 // mutationField extracts the cassette-response mutation's field selector. The
-// wire shape carries it in the existing `action` slot (Mutation.Action) so the
-// schema delta is just a one-line strategy enum addition. Whitespace is
+// wire shape carries it in the `action` YAML key (Go field: Mutation.Field) so
+// the schema delta is just a one-line strategy enum addition. Whitespace is
 // trimmed; an empty result means the submitter didn't declare a field.
 func mutationField(m Mutation) string {
-	return strings.TrimSpace(m.Action)
+	return strings.TrimSpace(m.Field)
 }
 
 // stringNewValue coerces m.NewValue into a string for body / header

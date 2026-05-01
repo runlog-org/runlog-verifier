@@ -91,8 +91,8 @@ verification:
 	if res.Status != "tier_unsupported" {
 		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
 	}
-	if len(res.Reasons) != 1 || res.Reasons[0].Code != "runtime_tool_not_yet_implemented" {
-		t.Fatalf("reasons=%v, want runtime_tool_not_yet_implemented", res.Reasons)
+	if len(res.Reasons) != 1 || res.Reasons[0].Code != "runtime_unsupported" {
+		t.Fatalf("reasons=%v, want runtime_unsupported", res.Reasons)
 	}
 	if !strings.Contains(res.Reasons[0].Message, "postgres") {
 		t.Fatalf("message=%q, expected to name postgres", res.Reasons[0].Message)
@@ -187,8 +187,8 @@ verification:
 	if res.Status != "tier_unsupported" {
 		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
 	}
-	if len(res.Reasons) != 1 || res.Reasons[0].Code != "isolation_not_yet_implemented" {
-		t.Fatalf("reasons=%v, want isolation_not_yet_implemented", res.Reasons)
+	if len(res.Reasons) != 1 || res.Reasons[0].Code != "isolation_unsupported" {
+		t.Fatalf("reasons=%v, want isolation_unsupported", res.Reasons)
 	}
 }
 

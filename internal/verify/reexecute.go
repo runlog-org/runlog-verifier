@@ -20,7 +20,7 @@ package verify
 //                  `sqlite3 $DB_PATH` with body on stdin.
 //
 // Other declared tools (postgres, redis, git, docker) surface as
-// `runtime_tool_not_yet_implemented`. The slice deliberately keeps
+// `runtime_unsupported`. The slice deliberately keeps
 // tool-specific drivers out of scope per CLAUDE.md invariant #10 ("cheap and
 // simple first") — adding a postgres/redis driver is a one-tool follow-up.
 //
@@ -65,7 +65,7 @@ import (
 
 // reexecuteSupportedTools enumerates the cassette.runtime.tool values this
 // build can drive. Entries declaring a tool outside this set surface
-// `runtime_tool_not_yet_implemented` so authors know the feature is recognised
+// `runtime_unsupported` so authors know the feature is recognised
 // but unimplemented (rather than malformed).
 var reexecuteSupportedTools = map[string]bool{
 	"shell":  true,
@@ -89,7 +89,7 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	res := Result{UnitID: e.UnitID, Tier: "integration"}
 
 	if !reexecuteSupportedIsolations[e.Verification.Isolation] {
-		return tierUnsupported(res, "isolation_not_yet_implemented", fmt.Sprintf(
+		return tierUnsupported(res, "isolation_unsupported", fmt.Sprintf(
 			"reexecute-mode isolation %q is not implemented in this verifier "+
 				"build — subprocess + database (sqlite) ship first; "+
 				"compiler / docker_daemon land in follow-up commits",
@@ -105,7 +105,7 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 			"cassette.mode: reexecute requires cassette.runtime.tool")
 	}
 	if !reexecuteSupportedTools[cas.Runtime.Tool] {
-		return tierUnsupported(res, "runtime_tool_not_yet_implemented", fmt.Sprintf(
+		return tierUnsupported(res, "runtime_unsupported", fmt.Sprintf(
 			"cassette.runtime.tool %q is not implemented in this verifier "+
 				"build — shell + sqlite ship first; postgres / redis / git / "+
 				"docker land in follow-up commits",
@@ -124,6 +124,10 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	failedSetup, failedAction := prep.FailedSetup, prep.FailedAction
 	workingSetup, workingAction := prep.WorkingSetup, prep.WorkingAction
 	failedInputs, workingInputs := prep.FailedInputs, prep.WorkingInputs
+
+	if r := validateTimeoutSeconds(e); r != nil {
+		return rejectedReasons(res, []Reason{*r})
+	}
 
 	timeout := e.Verification.TimeoutSeconds
 

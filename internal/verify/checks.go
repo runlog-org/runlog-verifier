@@ -164,7 +164,7 @@ func checkPrimitivesRegistered(e *Entry) []Reason {
 
 // checkAssertionOnlyShape enforces the assertion_only-specific schema
 // constraints: primitives_required is non-empty, no cassette, and the
-// timeout_seconds is set within the schema's [0, 300] range.
+// timeout_seconds is within the allowed range.
 func checkAssertionOnlyShape(e *Entry) []Reason {
 	var out []Reason
 	if len(e.Verification.PrimitivesRequired) == 0 {
@@ -179,16 +179,35 @@ func checkAssertionOnlyShape(e *Entry) []Reason {
 			Message: "assertion_only entries must not declare a cassette (schema)",
 		})
 	}
-	if e.Verification.TimeoutSeconds <= 0 || e.Verification.TimeoutSeconds > 300 {
-		out = append(out, Reason{
-			Code: "invalid_timeout",
-			Message: fmt.Sprintf(
-				"timeout_seconds=%v is outside the schema range (0, 300]",
-				e.Verification.TimeoutSeconds,
-			),
-		})
+	if r := validateTimeoutSeconds(e); r != nil {
+		out = append(out, *r)
 	}
 	return out
+}
+
+// validateTimeoutSeconds checks that e.Verification.TimeoutSeconds is in the
+// allowed range. The value 0 (or unset) is treated as "use driver default" —
+// callers such as runner/python.go and runner/subprocess.go already apply a
+// driver-defined default when the value is <= 0, so 0 is not an error. Only
+// explicitly negative values or values exceeding the 300-second cap are
+// rejected.
+//
+// Reason code: timeout_invalid (byte-stable for tooling).
+func validateTimeoutSeconds(e *Entry) *Reason {
+	ts := e.Verification.TimeoutSeconds
+	if ts < 0 || ts > 300 {
+		r := Reason{
+			Code: "timeout_invalid",
+			Message: fmt.Sprintf(
+				"timeout_seconds=%v is outside the allowed range — "+
+					"must be 0 (driver default) or in (0, 300]; "+
+					"negative values and values above 300 are rejected",
+				ts,
+			),
+		}
+		return &r
+	}
+	return nil
 }
 
 // isBreakLikeOutcome reports whether the raw outcome string signals that a

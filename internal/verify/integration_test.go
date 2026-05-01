@@ -243,7 +243,7 @@ func TestRunIntegrationReexecuteIsolationMismatch(t *testing.T) {
 	// mode to reexecute now routes through runReexecute, which only
 	// dispatches under {subprocess, database}. The entry is well-formed but
 	// its isolation isn't a reexecute-mode isolation — surface as
-	// isolation_not_yet_implemented (the precise diagnostic), not the old
+	// isolation_unsupported (the precise diagnostic), not the old
 	// cassette_mode_not_yet_implemented blanket.
 	//
 	// A runtime block is added because the schema's allOf gate (and our CLI
@@ -261,8 +261,8 @@ func TestRunIntegrationReexecuteIsolationMismatch(t *testing.T) {
 	if res.Status != "tier_unsupported" {
 		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
 	}
-	if !hasReason(res.Reasons, "isolation_not_yet_implemented") {
-		t.Fatalf("expected isolation_not_yet_implemented, got %v", res.Reasons)
+	if !hasReason(res.Reasons, "isolation_unsupported") {
+		t.Fatalf("expected isolation_unsupported, got %v", res.Reasons)
 	}
 }
 

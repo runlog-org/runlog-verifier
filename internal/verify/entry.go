@@ -58,8 +58,7 @@ type Mutation struct {
 	Target                 string            `yaml:"target"`
 	NewValue               any               `yaml:"new_value"`
 	Token                  string            `yaml:"token"`
-	Action                 string            `yaml:"action"`
-	Module                 string            `yaml:"module"`
+	Field                  string            `yaml:"action,omitempty"`
 	Branch                 string            `yaml:"branch"`
 	ExpectedResult         string            `yaml:"expected_result"`
 	ExpectedBranchOutcome  map[string]string `yaml:"expected_branch_outcome"`

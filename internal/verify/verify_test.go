@@ -162,8 +162,8 @@ verification:
 	if res.Status != "tier_unsupported" {
 		t.Fatalf("expected tier_unsupported, got %q (reasons=%v)", res.Status, res.Reasons)
 	}
-	if !hasReason(res.Reasons, "isolation_not_yet_implemented") {
-		t.Fatalf("expected isolation_not_yet_implemented, got %v", res.Reasons)
+	if !hasReason(res.Reasons, "isolation_unsupported") {
+		t.Fatalf("expected isolation_unsupported, got %v", res.Reasons)
 	}
 }
 

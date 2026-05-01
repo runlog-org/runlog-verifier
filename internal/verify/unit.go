@@ -68,6 +68,10 @@ func runUnit(e *Entry) Result {
 		return rejectedReasons(res, []Reason{*reason})
 	}
 
+	if r := validateTimeoutSeconds(e); r != nil {
+		return rejectedReasons(res, []Reason{*r})
+	}
+
 	timeout := e.Verification.TimeoutSeconds
 
 	failedRes, err := driver.Run(prep.FailedSetup, prep.FailedAction, prep.FailedInputs, timeout)
