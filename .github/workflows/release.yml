@@ -2,7 +2,7 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "verifier/v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -100,7 +100,7 @@ jobs:
       # Only create a Release on a real tag push. workflow_dispatch is a
       # smoke run — artifacts above are enough to inspect.
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           draft: ${{ steps.meta.outputs.draft == 'true' }}

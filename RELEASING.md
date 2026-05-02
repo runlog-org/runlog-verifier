@@ -13,13 +13,22 @@ artefacts attached.
 
        git checkout main && git pull --ff-only
 
-2. Tag and push:
+2. Tag and push. The current convention is the path-scoped shape
+   `verifier/vX.Y.Z` per the M02 release-train discipline
+   (// TODO link runlog-docs/13-release-trains.md):
 
-       git tag -a v0.2.0 -m "v0.2.0"
-       git push origin v0.2.0
+       git tag -a verifier/v0.2.0 -m "v0.2.0"
+       git push origin verifier/v0.2.0
 
-   Tags matching `v*-rc*`, `v*-beta*`, or `v*-alpha*` produce a **draft**
-   Release; everything else is published immediately.
+   The legacy unprefixed shape `vX.Y.Z` continues to fire the same
+   workflow (soft cut), so existing pinned consumers of `v0.1.0` stay
+   valid forever — they don't need to migrate. New releases should use
+   the prefixed shape; the unprefixed shape is kept only so we never
+   need a flag day.
+
+   Tags matching `*-rc*`, `*-beta*`, or `*-alpha*` produce a **draft**
+   Release; everything else is published immediately. The prerelease
+   regex matches the suffix and works on both tag shapes.
 
 3. Watch the workflow run on GitHub Actions. On success, the Release
    page lists four binaries plus `SHA256SUMS`:
@@ -40,7 +49,7 @@ matches its source by re-running the same build and comparing hashes:
 
 To rebuild from source and compare:
 
-    git checkout v0.2.0
+    git checkout verifier/v0.2.0
     make release
     diff <(sort -k2 dist/SHA256SUMS) <(sort -k2 /path/to/downloaded/SHA256SUMS)
 
