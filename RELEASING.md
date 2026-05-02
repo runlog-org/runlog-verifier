@@ -15,7 +15,7 @@ artefacts attached.
 
 2. Tag and push. The current convention is the path-scoped shape
    `verifier/vX.Y.Z` per the M02 release-train discipline
-   (// TODO link runlog-docs/13-release-trains.md):
+   (see [`runlog-docs/13-release-trains.md`](https://github.com/runlog-org/runlog-docs/blob/main/13-release-trains.md)):
 
        git tag -a verifier/v0.2.0 -m "v0.2.0"
        git push origin verifier/v0.2.0
