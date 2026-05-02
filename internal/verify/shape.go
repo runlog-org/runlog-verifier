@@ -8,10 +8,19 @@ import (
 	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
+// errActionStepsBlockUnsupported is returned by stepsFromAny when the input is
+// the schema's action_steps_block shape (`{steps: [...]}`). The schema
+// recognises the shape but v0.1 has no driver for it — callers route this
+// through the typed `action_shape_unsupported` Reason code rather than
+// letting it be wrapped as `malformed_action`, which would mislead seed
+// authors into looking for a parser bug.
+var errActionStepsBlockUnsupported = errors.New("action_steps_block shape (steps:) not yet implemented in v0.1")
+
 // stepsFromAny normalizes the schema's `setup` (always array) and
 // `action` (single | array | block) shapes into []runner.Step. The
-// action_steps_block shape (`{steps: [...]}`) is rejected as not yet
-// implemented — flagged distinctly so submitters know it isn't their bug.
+// action_steps_block shape (`{steps: [...]}`) returns
+// errActionStepsBlockUnsupported — recognised-but-unimplemented, distinct
+// from a true shape error.
 func stepsFromAny(v any) ([]runner.Step, error) {
 	if v == nil {
 		return nil, nil
@@ -29,7 +38,7 @@ func stepsFromAny(v any) ([]runner.Step, error) {
 		return out, nil
 	case map[string]any:
 		if _, hasSteps := t["steps"]; hasSteps {
-			return nil, errors.New("action_steps_block shape (steps:) not yet implemented in v0.1")
+			return nil, errActionStepsBlockUnsupported
 		}
 		return []runner.Step{stepFromMap(t)}, nil
 	default:
@@ -130,16 +139,18 @@ func returnPathFromDifferential(diff map[string]any, branchKey string) (string, 
 	return s, nil
 }
 
-// pathExtractStep builds a runner step that rebinds $RESULT to the value at
-// the given dotted dict-key path. v0.1 supports only string-keyed dot paths
+// pythonPathExtractStep builds a runner step that rebinds $RESULT to the value
+// at the given dotted dict-key path. v0.1 supports only string-keyed dot paths
 // (no numeric indices, no attribute access). Embedded dots in keys aren't
 // supported — the path is plain `.`-split.
+//
+// Python-specific: emits dict-access syntax.
 //
 // Example: path = "a.b" -> body = "$RESULT = $RESULT['a']['b']"
 //
 // The step runs inside the action's try/except, so a missing key raises
 // KeyError and is captured as a real exception by the existing handler.
-func pathExtractStep(path string) runner.Step {
+func pythonPathExtractStep(path string) runner.Step {
 	var sb strings.Builder
 	sb.WriteString("$RESULT = $RESULT")
 	for _, key := range strings.Split(path, ".") {
@@ -151,6 +162,25 @@ func pathExtractStep(path string) runner.Step {
 		sb.WriteString("']")
 	}
 	return runner.Step{Type: "code", Lang: "python", Body: sb.String()}
+}
+
+// shapeReason wraps a stepsFromAny error into the appropriate Reason. The
+// action_steps_block sentinel routes to the recognised-but-unimplemented
+// `action_shape_unsupported` code so seed authors don't chase a parser bug;
+// every other shape error stays under the per-field `malformed_<field>` code.
+// fieldKey is the schema-side selector name without the `malformed_` prefix
+// (e.g. "failed_action").
+func shapeReason(fieldKey string, err error) *Reason {
+	if errors.Is(err, errActionStepsBlockUnsupported) {
+		return &Reason{
+			Code: "action_shape_unsupported",
+			Message: fmt.Sprintf(
+				"%s: %v — the action_steps_block shape is recognised by the schema but no driver is "+
+					"registered in this verifier build",
+				fieldKey, err),
+		}
+	}
+	return &Reason{Code: "malformed_" + fieldKey, Message: err.Error()}
 }
 
 // preparedBranches is the typed bundle of per-branch step shapes + inputs that
@@ -180,22 +210,22 @@ func prepareBranches(e *Entry, appendPathExtract bool) (preparedBranches, *Reaso
 	var p preparedBranches
 
 	if v, err := stepsFromAny(e.FailedApproach.Setup); err != nil {
-		return p, &Reason{Code: "malformed_failed_setup", Message: err.Error()}
+		return p, shapeReason("failed_setup", err)
 	} else {
 		p.FailedSetup = v
 	}
 	if v, err := stepsFromAny(e.FailedApproach.Action); err != nil {
-		return p, &Reason{Code: "malformed_failed_action", Message: err.Error()}
+		return p, shapeReason("failed_action", err)
 	} else {
 		p.FailedAction = v
 	}
 	if v, err := stepsFromAny(e.WorkingApproach.Setup); err != nil {
-		return p, &Reason{Code: "malformed_working_setup", Message: err.Error()}
+		return p, shapeReason("working_setup", err)
 	} else {
 		p.WorkingSetup = v
 	}
 	if v, err := stepsFromAny(e.WorkingApproach.Action); err != nil {
-		return p, &Reason{Code: "malformed_working_action", Message: err.Error()}
+		return p, shapeReason("working_action", err)
 	} else {
 		p.WorkingAction = v
 	}
@@ -210,10 +240,10 @@ func prepareBranches(e *Entry, appendPathExtract bool) (preparedBranches, *Reaso
 			return p, &Reason{Code: "malformed_return_path", Message: err.Error()}
 		}
 		if failedPath != "" {
-			p.FailedAction = append(p.FailedAction, pathExtractStep(failedPath))
+			p.FailedAction = append(p.FailedAction, pythonPathExtractStep(failedPath))
 		}
 		if workingPath != "" {
-			p.WorkingAction = append(p.WorkingAction, pathExtractStep(workingPath))
+			p.WorkingAction = append(p.WorkingAction, pythonPathExtractStep(workingPath))
 		}
 	}
 

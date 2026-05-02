@@ -160,6 +160,15 @@ func tierUnsupportedReasons(res Result, reasons []Reason) Result {
 	return res
 }
 
+// isEnvErr reports whether err is an environmental failure (timeout, missing
+// interpreter) that should surface as `mutation_runner_error` rather than be
+// reclassified as outcomeFail. Shared by every per-tier mutation runner
+// (unit, integration replay, integration reexecute) so the env-vs-real-fail
+// boundary stays in one place.
+func isEnvErr(err error) bool {
+	return errors.Is(err, runner.ErrTimeout) || errors.Is(err, runner.ErrInterpreterMissing)
+}
+
 // runnerError maps a runner error to a verifier outcome. Interpreter or
 // language unsupported degrade to tier_unsupported (the submitter cannot
 // fix the entry to verify on this host); other errors are rejection.

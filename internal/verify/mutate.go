@@ -353,10 +353,19 @@ func forEachMutationBranch(
 // because the mutation-as-test framework treats those as "the mutated
 // program failed" rather than "the verifier host couldn't run the test".
 func synthesizeMutationCrash(err error) runner.ExecResult {
+	return synthesizeMutationCrashMessage(err.Error())
+}
+
+// synthesizeMutationCrashMessage is the message-string form of
+// synthesizeMutationCrash. The reexecute mutation runner already has a
+// pre-formatted "branch: err" message it wants to surface verbatim instead of
+// re-stringifying the underlying error; both forms produce the same shape so
+// the outcome classifier path stays uniform.
+func synthesizeMutationCrashMessage(msg string) runner.ExecResult {
 	return runner.ExecResult{
 		Raised:    true,
 		Exception: "SubprocessError",
-		Message:   err.Error(),
+		Message:   msg,
 	}
 }
 
@@ -372,24 +381,38 @@ func mutationOutcomeMismatchReason(idx int, m Mutation, branch branchKind, expec
 	}
 }
 
-// mutationDidNotDiscriminateSourceReason builds the source-mutation
-// non-discrimination hint used when a swap_function_call / swap_identifier /
-// remove_kwarg / drop_flag rewrote the action source but the program's
-// observable behaviour was byte-identical to the baseline. Caller is
+// mutationDidNotDiscriminateReason builds the non-discrimination hint Reason
+// for both the source-mutation and cassette-response forms. Caller is
 // responsible for the gating check (expected == outcomeFail, actual ==
-// outcomeUnchanged, discriminatingStrategies[m.Strategy], !stepBodiesEqual).
-// Integration-tier uses a different cassette-response variant of this hint
-// inline; this helper is only for the source-mutation form.
-func mutationDidNotDiscriminateSourceReason(idx int, m Mutation, branch branchKind) Reason {
-	token, _ := resolveSwapToken(m)
-	return Reason{
-		Code: "mutation_did_not_discriminate",
-		Message: fmt.Sprintf(
-			"mutation #%d (%s) on %s: rewrote source but produced no behavioural change. "+
+// outcomeUnchanged, plus per-form additional gates — see callsites). scope
+// selects the message variant:
+//
+//	"source"           — source-mutating strategy rewrote the action but the
+//	                     program's output was byte-identical to the baseline.
+//	"cassette_response" — cassette-response perturbation didn't change the
+//	                     action's observable behaviour (the action ignored
+//	                     the perturbed field).
+func mutationDidNotDiscriminateReason(idx int, m Mutation, branch branchKind, scope string) Reason {
+	var body string
+	switch scope {
+	case "cassette_response":
+		body = fmt.Sprintf(
+			"perturbed cassette response (target=%q field=%s) but produced no behavioural change. "+
+				"The action did not consult the perturbed response field — pick a field the action "+
+				"actually reads, or assert expected_result: unchanged if this tolerance is the claim.",
+			m.Target, mutationField(m))
+	default: // "source"
+		token, _ := resolveSwapToken(m)
+		body = fmt.Sprintf(
+			"rewrote source but produced no behavioural change. "+
 				"The token %q was substituted in the action source but the program's observable "+
 				"output was byte-identical to the baseline. Pick a token that actually discriminates "+
 				"(a literal value, a function name with side effects, or a flag).",
-			idx+1, m.Strategy, branch, token),
+			token)
+	}
+	return Reason{
+		Code:    "mutation_did_not_discriminate",
+		Message: fmt.Sprintf("mutation #%d (%s) on %s: %s", idx+1, m.Strategy, branch, body),
 	}
 }
 
@@ -454,7 +477,7 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			actual == outcomeUnchanged &&
 			discriminatingStrategies[m.Strategy] &&
 			!stepBodiesEqual(baseline.Action, mutAction) {
-			return []Reason{mutationDidNotDiscriminateSourceReason(idx, m, branch)}
+			return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, "source")}
 		}
 		return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
 	})
@@ -481,12 +504,18 @@ func branchesFor(m Mutation) []branchKind {
 // expectedOutcomeFor resolves the expected outcome for one branch. Returns
 // (expected, isInapplicable, hasExpectation). expected_branch_outcome takes
 // precedence over expected_result when both are set on a single mutation.
+//
+// The boolean passed to parseMutationOutcome distinguishes the two schema
+// alphabets: expected_branch_outcome.* is the broader enum (accepts
+// "assertion_does_not_match", folded into outcomeFail); expected_result is
+// narrower (rejects "assertion_does_not_match") so a hand-crafted CLI-path
+// entry can't smuggle that token through without an upstream JSON Schema gate.
 func expectedOutcomeFor(m Mutation, k branchKind) (mutationOutcome, bool, bool) {
 	if v, ok := m.ExpectedBranchOutcome[k.String()]; ok {
-		return canonicalizeBranchOutcome(v)
+		return parseMutationOutcome(v, true)
 	}
 	if m.ExpectedResult != "" {
-		return canonicalizeResult(m.ExpectedResult)
+		return parseMutationOutcome(m.ExpectedResult, false)
 	}
 	return "", false, false
 }
@@ -516,19 +545,6 @@ func parseMutationOutcome(s string, allowAssertionMismatch bool) (mutationOutcom
 		return "", true, true
 	}
 	return "", false, false
-}
-
-// canonicalizeBranchOutcome maps the schema's expected_branch_outcome.* enum
-// (the broader of the two — accepts assertion_does_not_match) to the internal
-// outcome enum.
-func canonicalizeBranchOutcome(s string) (mutationOutcome, bool, bool) {
-	return parseMutationOutcome(s, true)
-}
-
-// canonicalizeResult maps the schema's expected_result enum (narrower — does
-// NOT accept assertion_does_not_match) to the internal outcome enum.
-func canonicalizeResult(s string) (mutationOutcome, bool, bool) {
-	return parseMutationOutcome(s, false)
 }
 
 // classifyOutcome compares a re-run ExecResult against the un-mutated baseline

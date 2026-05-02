@@ -348,12 +348,11 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 				// setup_script_failed under a mutation: synthesize a raised
 				// ExecResult so the outcome classifier produces outcomeFail.
 				// The setup script is part of the test surface — if a mutation
-				// breaks it, that's a real fail, not a runner error.
-				got = runner.ExecResult{
-					Raised:    true,
-					Exception: "SubprocessError",
-					Message:   runReason.Message,
-				}
+				// breaks it, that's a real fail, not a runner error. Reuse the
+				// shared helper so the synthesized-crash shape stays uniform
+				// with replay/unit tier; the message form keeps the pre-formatted
+				// "branch: err" wrapping that runReason already carries.
+				got = synthesizeMutationCrashMessage(runReason.Message)
 			}
 
 			actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
@@ -364,7 +363,7 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 				actual == outcomeUnchanged &&
 				discriminatingStrategies[m.Strategy] &&
 				!stepBodiesEqual(baseline.Action, mutAction) {
-				return []Reason{mutationDidNotDiscriminateSourceReason(idx, m, branch)}
+				return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, "source")}
 			}
 			return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
 		}()
