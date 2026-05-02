@@ -13,18 +13,21 @@ artefacts attached.
 
        git checkout main && git pull --ff-only
 
-2. Tag and push. The current convention is the path-scoped shape
-   `verifier/vX.Y.Z` per the M02 release-train discipline
-   (see [`runlog-docs/13-release-trains.md`](https://github.com/runlog-org/runlog-docs/blob/main/13-release-trains.md)):
+2. Tag and push. The canonical shape is plain `vX.Y.Z`:
 
-       git tag -a verifier/v0.2.0 -m "v0.2.0"
-       git push origin verifier/v0.2.0
+       git tag -a v0.2.0 -m "v0.2.0"
+       git push origin v0.2.0
 
-   The legacy unprefixed shape `vX.Y.Z` continues to fire the same
-   workflow (soft cut), so existing pinned consumers of `v0.1.0` stay
-   valid forever — they don't need to migrate. New releases should use
-   the prefixed shape; the unprefixed shape is kept only so we never
-   need a flag day.
+   The path-scoped shape `verifier/vX.Y.Z` is also accepted by the
+   workflow (a soft-cut concession for the brief window when the M02
+   release-train convention defaulted to path-scoping for every repo),
+   but it should not be used: `runlog-verifier` has `go.mod` at the
+   repo root, and Go's module proxy (`proxy.golang.org` /
+   `pkg.go.dev`) only resolves tags of the shape
+   `<module-root>/vX.Y.Z`. A `verifier/vX.Y.Z` tag is invisible to the
+   proxy and consumers cannot `go get` against it. See
+   [`runlog-docs/13-release-trains.md`](https://github.com/runlog-org/runlog-docs/blob/main/13-release-trains.md#181-the-path-scoped-tag-convention)
+   for the broader convention and the Go-module-at-root carve-out.
 
    Tags matching `*-rc*`, `*-beta*`, or `*-alpha*` produce a **draft**
    Release; everything else is published immediately. The prerelease
@@ -49,7 +52,7 @@ matches its source by re-running the same build and comparing hashes:
 
 To rebuild from source and compare:
 
-    git checkout verifier/v0.2.0
+    git checkout v0.2.0
     make release
     diff <(sort -k2 dist/SHA256SUMS) <(sort -k2 /path/to/downloaded/SHA256SUMS)
 
