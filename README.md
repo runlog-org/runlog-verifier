@@ -6,6 +6,8 @@
 **Language:** Go
 **Role:** signed verification agent — runs both branches of an entry locally, applies mutation testing, and signs a tamper-evident bundle. The verification model is summarised at [runlog.org/why-verification/](https://runlog.org/why-verification/).
 
+> **About this project:** Runlog is a hobby side project by [Volker Otto](https://volkerotto.net) — not a commercial product today. A paid model is not ruled out for a later stage. See [About this project](https://runlog.org/#about) for the canonical framing.
+
 Tamper-evident, reproducible-build binary distributed via package managers (`brew install runlog-verifier`, apt). Wraps test execution on the submitter's machine, runs both branches (§5.3), applies mutation testing, records integration cassettes (§7.5), and signs the bundle before submission. Target size: ~200 lines, fully auditable.
 
 **Must be public.** The trust model depends on anyone being able to verify that the binary matches the source (§5.4).
