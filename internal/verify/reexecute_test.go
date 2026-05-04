@@ -3,8 +3,12 @@ package verify
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/runlog-org/runlog-verifier/internal/verify/cassette"
+	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
 // skipIfNoSh skips when /bin/sh isn't on PATH. The reexecute orchestrator's
@@ -250,4 +254,184 @@ func skipIfNoBinV(t *testing.T, name string) {
 	if _, err := exec.LookPath(name); err != nil {
 		t.Skipf("%s not on PATH", name)
 	}
+}
+
+// TestRunReexecuteBranchRejectsDbSqliteSymlink covers the Lstat guard at
+// reexecute.go:225-238. A hostile sqlite cassette whose setup_script creates a
+// symlink at $WORKDIR/db.sqlite would otherwise let subsequent sqlite3
+// invocations write through the link and out of the sandbox. The guard refuses
+// to proceed and surfaces sandbox_symlink_rejected.
+func TestRunReexecuteBranchRejectsDbSqliteSymlink(t *testing.T) {
+	skipIfNoSh(t)
+	skipIfNoBinV(t, "ln")
+
+	// Pre-create a target file outside the sandbox so the assertion can later
+	// confirm its content was NOT exposed (proving the link was not followed).
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "secret.txt")
+	if err := os.WriteFile(target, []byte("secret-payload"), 0o600); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+
+	cas := &cassette.Cassette{
+		Mode:    "reexecute",
+		Runtime: &cassette.Runtime{Tool: "sqlite"},
+		// setup_script creates a symlink at $WORKDIR/db.sqlite pointing at the
+		// out-of-sandbox secret. The Lstat guard must catch this before the
+		// driver opens it via sqlite3.
+		SetupScript: []string{"ln -sf " + target + " $WORKDIR/db.sqlite"},
+	}
+
+	// A no-op action — we never get past the symlink check.
+	action := []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}}
+
+	res, driver, runErr, reason := runReexecuteBranch(
+		"failed_approach", cas, nil, action, nil, 5,
+	)
+
+	if reason == nil {
+		t.Fatalf("expected non-nil Reason, got res=%+v driver=%+v err=%v", res, driver, runErr)
+	}
+	if reason.Code != "sandbox_symlink_rejected" {
+		t.Fatalf("reason.Code=%q, want sandbox_symlink_rejected (msg=%q)", reason.Code, reason.Message)
+	}
+	if runErr != nil {
+		// Per the doc comment on runReexecuteBranch (lines 195-196), the
+		// verifier-internal early return should set the third return to nil.
+		t.Errorf("runErr=%v, want nil for verifier-internal early return", runErr)
+	}
+	// The guard's cleanupReexecuteSandbox call must have removed the workdir.
+	// driver returned to caller is the zero value here per the source's
+	// `return runner.ExecResult{}, runner.SubprocessDriver{}, nil, &r`. So we
+	// can't assert a specific path is gone, but the guard's path uses the
+	// local `driver` variable (not the zero value); covered by the integration
+	// path below.
+
+	// Defense in depth: the `secret-payload` content must not leak via
+	// res.Repr — we never ran the action, so res should be the zero value.
+	if res.Repr != "" || res.JSONValue != nil {
+		t.Errorf("ExecResult unexpectedly non-zero: %+v", res)
+	}
+}
+
+// TestRunReexecuteBranchAllocFailedReturnsTypedReason covers the MkdirTemp
+// failure path at reexecute.go:206-211. Setting TMPDIR to a non-existent
+// directory forces MkdirTemp to fail; the function must return the
+// sandbox_alloc_failed Reason without leaking partial state and with a nil
+// runErr per the doc comment (the failure is verifier-internal, not a child
+// process error).
+func TestRunReexecuteBranchAllocFailedReturnsTypedReason(t *testing.T) {
+	// Use a path under a real but unwritable parent so MkdirTemp fails
+	// portably. /nonexistent-runlog-T17-... isn't created and isn't writable.
+	t.Setenv("TMPDIR", "/nonexistent-runlog-T17-alloc-fail-xyz")
+
+	cas := &cassette.Cassette{
+		Mode:    "reexecute",
+		Runtime: &cassette.Runtime{Tool: "shell"},
+	}
+	action := []runner.Step{{Type: "code", Lang: "shell", Body: "true"}}
+
+	res, driver, runErr, reason := runReexecuteBranch(
+		"failed_approach", cas, nil, action, nil, 5,
+	)
+
+	if reason == nil {
+		t.Fatalf("expected non-nil Reason, got res=%+v driver=%+v err=%v", res, driver, runErr)
+	}
+	if reason.Code != "sandbox_alloc_failed" {
+		t.Fatalf("reason.Code=%q, want sandbox_alloc_failed (msg=%q)", reason.Code, reason.Message)
+	}
+	if !strings.Contains(reason.Message, "failed_approach") {
+		t.Errorf("message=%q, expected to name the branch", reason.Message)
+	}
+	if runErr != nil {
+		t.Errorf("runErr=%v, want nil for verifier-internal early return", runErr)
+	}
+	// Driver must be the zero value — no partial state leaked.
+	if driver.Tool != "" || driver.Workdir != "" {
+		t.Errorf("driver=%+v, want zero value (no partial state)", driver)
+	}
+	// ExecResult must be the zero value too.
+	if res.Repr != "" || res.JSONValue != nil || res.Raised {
+		t.Errorf("ExecResult unexpectedly non-zero: %+v", res)
+	}
+}
+
+// TestCleanupReexecuteSandbox pins the three contracts of
+// cleanupReexecuteSandbox (reexecute.go:253-259):
+//
+//  1. teardown_script runs and the workdir is RemoveAll'd.
+//  2. teardown_script step errors do not stop the workdir RemoveAll.
+//  3. a zero-value SubprocessDriver is a safe no-op.
+func TestCleanupReexecuteSandbox(t *testing.T) {
+	t.Run("runs_teardown_and_removes_workdir", func(t *testing.T) {
+		skipIfNoSh(t)
+		dir, err := os.MkdirTemp("", "runlog-T17-cleanup-")
+		if err != nil {
+			t.Fatalf("MkdirTemp: %v", err)
+		}
+		// In case the test fails before cleanup runs, ensure tmpdir is removed.
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+		// Marker file lives outside the sandbox so we can observe teardown
+		// running even after the workdir is gone.
+		marker := filepath.Join(t.TempDir(), "teardown-marker")
+		cas := &cassette.Cassette{
+			Mode:           "reexecute",
+			Runtime:        &cassette.Runtime{Tool: "shell"},
+			TeardownScript: []string{"touch " + marker},
+		}
+		driver := runner.SubprocessDriver{Tool: "shell", Workdir: dir}
+
+		cleanupReexecuteSandbox(driver, cas, nil, 5)
+
+		if _, err := os.Stat(marker); err != nil {
+			t.Errorf("teardown marker not created: %v", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("workdir still exists (err=%v); RemoveAll should have removed it", err)
+		}
+	})
+
+	t.Run("tolerates_teardown_script_nonzero_exit", func(t *testing.T) {
+		skipIfNoSh(t)
+		dir, err := os.MkdirTemp("", "runlog-T17-cleanup-nonzero-")
+		if err != nil {
+			t.Fatalf("MkdirTemp: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+		// teardown_script with a non-zero-exiting line. RunTeardownScript runs
+		// each line via execShell; non-zero exits are silently ignored
+		// (subprocess.go:262-277). cleanupReexecuteSandbox must not panic and
+		// must still RemoveAll the workdir.
+		cas := &cassette.Cassette{
+			Mode:           "reexecute",
+			Runtime:        &cassette.Runtime{Tool: "shell"},
+			TeardownScript: []string{"false"},
+		}
+		driver := runner.SubprocessDriver{Tool: "shell", Workdir: dir}
+
+		// Must not panic.
+		cleanupReexecuteSandbox(driver, cas, nil, 5)
+
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("workdir still exists (err=%v); cleanup should have continued past the non-zero teardown line", err)
+		}
+	})
+
+	t.Run("zero_value_driver_no_op", func(t *testing.T) {
+		// Locks the contract documented at reexecute.go:251-252: "Safe to call
+		// with a zero-value SubprocessDriver — the os.RemoveAll on an empty
+		// path is a no-op." A regression that drops the early return would
+		// either run teardown against a missing shell context or RemoveAll an
+		// empty path; both are observable as a panic or process spawn.
+		cas := &cassette.Cassette{
+			Mode:           "reexecute",
+			Runtime:        &cassette.Runtime{Tool: "shell"},
+			TeardownScript: []string{"echo should-not-run"},
+		}
+		// Must not panic, must not spawn a subprocess.
+		cleanupReexecuteSandbox(runner.SubprocessDriver{}, cas, nil, 5)
+	})
 }

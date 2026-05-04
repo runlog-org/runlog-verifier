@@ -364,6 +364,126 @@ func TestValidateInputNameAcceptsOrdinary(t *testing.T) {
 	}
 }
 
+// TestValidateInputsRejectsReservedNames pins the wrapper's behaviour for the
+// explicit reservedInputNames map. The wrapper is what `Run` /
+// `RunSetupScript` / `RunTeardownScript` actually call; if a regression
+// short-circuits the wrapper or drops the reserved-name check, hostile
+// cassettes could redefine PATH / LD_PRELOAD / etc. and redirect interpreter
+// lookup before our subprocesses run.
+func TestValidateInputsRejectsReservedNames(t *testing.T) {
+	for _, name := range []string{
+		"PATH", "$PATH", "IFS", "HOME", "LD_PRELOAD", "LD_LIBRARY_PATH",
+		"BASH_ENV", "ENV", "USER", "SHELL", "LANG",
+	} {
+		err := validateInputs(map[string]any{name: ""})
+		if err == nil {
+			t.Errorf("validateInputs(%q) accepted; want rejection", name)
+			continue
+		}
+		if !errors.Is(err, ErrInputInvalidName) {
+			t.Errorf("validateInputs(%q): err=%v, want wrapping ErrInputInvalidName", name, err)
+		}
+	}
+}
+
+// TestValidateInputsRejectsDYLDPrefix exercises the prefix branch
+// (subprocess.go:96) through the wrapper. macOS-specific DYLD_* env vars
+// aren't enumerated in reservedInputNames; the prefix check is what blocks
+// them. A regression that drops the prefix check would let a cassette set
+// DYLD_INSERT_LIBRARIES on a macOS submitter's host.
+func TestValidateInputsRejectsDYLDPrefix(t *testing.T) {
+	for _, name := range []string{
+		"DYLD_INSERT_LIBRARIES",
+		"DYLD_FALLBACK_LIBRARY_PATH",
+		"$DYLD_FRAMEWORK_PATH",
+		"DYLD_ANYTHING",
+	} {
+		err := validateInputs(map[string]any{name: ""})
+		if err == nil {
+			t.Errorf("validateInputs(%q) accepted; want rejection via DYLD_ prefix", name)
+			continue
+		}
+		if !errors.Is(err, ErrInputInvalidName) {
+			t.Errorf("validateInputs(%q): err=%v, want wrapping ErrInputInvalidName", name, err)
+		}
+	}
+}
+
+// TestValidateInputsRejectsLCPrefix exercises the LC_ prefix branch. Locale
+// vars are reserved because shell behaviour (collation, message language,
+// numeric formatting) shifts under them, and a hostile cassette setting LC_ALL
+// could perturb branch outputs in subtle ways.
+func TestValidateInputsRejectsLCPrefix(t *testing.T) {
+	for _, name := range []string{
+		"LC_ALL",
+		"LC_MESSAGES",
+		"LC_TIME",
+		"$LC_RANDOM_THING",
+	} {
+		err := validateInputs(map[string]any{name: ""})
+		if err == nil {
+			t.Errorf("validateInputs(%q) accepted; want rejection via LC_ prefix", name)
+			continue
+		}
+		if !errors.Is(err, ErrInputInvalidName) {
+			t.Errorf("validateInputs(%q): err=%v, want wrapping ErrInputInvalidName", name, err)
+		}
+	}
+}
+
+// TestValidateInputsAcceptsOrdinaryNames pins the happy path. Ordinary
+// identifiers must not be over-rejected by the wrapper.
+func TestValidateInputsAcceptsOrdinaryNames(t *testing.T) {
+	inputs := map[string]any{
+		"PAYLOAD":    "x",
+		"$PAYLOAD2":  "y",
+		"_x":         "z",
+		"table_name": "t",
+		"K2":         "k",
+	}
+	if err := validateInputs(inputs); err != nil {
+		t.Errorf("validateInputs(ordinary): err=%v, want nil", err)
+	}
+}
+
+// TestValidateInputsAcceptsAutoInjectedSandboxVars pins the WORKDIR / DB_PATH
+// exemption (subprocess.go:108-111). These are driver-set, not submitter-set:
+// `Run` auto-injects them via mergeInputs, then re-validates the merged map.
+// If a future refactor drops the carve-out, the driver breaks because
+// validateInputs would reject the names the driver itself supplied.
+func TestValidateInputsAcceptsAutoInjectedSandboxVars(t *testing.T) {
+	inputs := map[string]any{
+		"WORKDIR":  "/tmp/x",
+		"$DB_PATH": "/tmp/x/db.sqlite",
+		"PAYLOAD":  "ok",
+	}
+	if err := validateInputs(inputs); err != nil {
+		t.Errorf("validateInputs(WORKDIR/DB_PATH/PAYLOAD): err=%v, want nil", err)
+	}
+}
+
+// TestValidateInputsRejectsMalformedNames pins the shape check via the
+// wrapper. Malformed names must be rejected before they reach buildEnv where
+// they would become env-list assignments.
+func TestValidateInputsRejectsMalformedNames(t *testing.T) {
+	for _, name := range []string{
+		"",
+		"1FOO",
+		"FOO-BAR",
+		"FOO BAR",
+		"$",
+	} {
+		err := validateInputs(map[string]any{name: ""})
+		if err == nil {
+			t.Errorf("validateInputs(%q) accepted; want rejection", name)
+			continue
+		}
+		if !errors.Is(err, ErrInputInvalidName) {
+			t.Errorf("validateInputs(%q): err=%v, want wrapping ErrInputInvalidName", name, err)
+		}
+	}
+}
+
 func TestRedactStderrRedactsTokens(t *testing.T) {
 	const fakeToken = "EXAMPLE_TOKEN_NOT_A_REAL_SECRET_PADDING_PADDING"
 	in := []byte("Bearer " + fakeToken + " and trailing")
