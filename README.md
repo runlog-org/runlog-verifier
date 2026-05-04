@@ -12,6 +12,23 @@ Tamper-evident, reproducible-build binary distributed via package managers (`bre
 
 **Must be public.** The trust model depends on anyone being able to verify that the binary matches the source (§5.4).
 
+## Install / Update
+
+One-liner — fetches the latest release, verifies SHA256, drops the binary at
+`~/.local/bin/runlog-verifier`. Re-run to update; idempotent if you're
+already on the latest version:
+
+    curl -sSL https://raw.githubusercontent.com/runlog-org/runlog-verifier/main/install.sh | sh
+
+Pin a version or change the install dir via env vars:
+
+    curl -sSL https://raw.githubusercontent.com/runlog-org/runlog-verifier/main/install.sh \
+      | VERSION=v0.2.0 INSTALL_DIR=$HOME/bin sh
+
+The script is plain POSIX `sh` (`install.sh` at the repo root). It supports
+`linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`. For other
+platforms, build from source per the [Build](#build) section below.
+
 ## Layout
 
 - `cmd/runlog-verifier/` — entry point
