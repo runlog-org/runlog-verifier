@@ -48,6 +48,16 @@ type Verification struct {
 	Mutations           []Mutation     `yaml:"mutations"`
 	TimeoutSeconds      float64        `yaml:"timeout_seconds"`
 	Cassette            map[string]any `yaml:"cassette"`
+	Runtime             *RuntimeSpec   `yaml:"runtime"`
+}
+
+// RuntimeSpec mirrors verification.runtime — the unit-tier counterpart of
+// cassette.runtime. Names the host CLI the verifier drives when isolation
+// is subprocess-flavored (and any future non-cassette runtime-aware
+// isolation). Tool is required; Version is advisory in v0.1.
+type RuntimeSpec struct {
+	Tool    string `yaml:"tool"`
+	Version string `yaml:"version"`
 }
 
 // Mutation mirrors the per-mutation entry. Both expected_result and

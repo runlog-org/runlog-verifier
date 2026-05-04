@@ -3,9 +3,20 @@ package verify
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
+
+// unitSubprocessSupportedTools enumerates the verification.runtime.tool values
+// the unit-tier subprocess path can drive. Mirrors reexecuteSupportedTools but
+// scoped to unit-tier so adding a tool at one tier doesn't silently flip it on
+// at the other. Anything outside this set surfaces `runtime_unsupported` so
+// authors know the tool is recognised but unimplemented.
+var unitSubprocessSupportedTools = map[string]bool{
+	"shell":  true,
+	"sqlite": true,
+}
 
 // schemaIsolations is the full enum from schema/entry.schema.yaml's
 // verification.isolation field. The dispatcher uses it to distinguish
@@ -42,6 +53,14 @@ func runUnit(e *Entry) Result {
 	iso := e.Verification.Isolation
 	if iso == "" {
 		iso = "function"
+	}
+
+	// subprocess isolation is dispatched ad-hoc rather than through
+	// runner.DriverFor: SubprocessDriver is stateful (per-branch
+	// Workdir), so a singleton-style registry doesn't fit. Mirrors the
+	// reexecute-tier pattern in reexecute.go.
+	if iso == "subprocess" {
+		return runUnitSubprocess(e)
 	}
 
 	driver, registered := runner.DriverFor(iso)
@@ -185,4 +204,227 @@ func runnerError(res Result, branch string, err error) Result {
 	default:
 		return rejected(res, "branch_runner_error", fmt.Sprintf("%s: %v", branch, err))
 	}
+}
+
+// runUnitSubprocess handles tier == "unit" + isolation == "subprocess". The
+// shape mirrors runReexecute (per-branch tmpdir + SubprocessDriver + per-
+// mutation fresh sandbox) but without the cassette: unit-tier subprocess has
+// no setup_script / teardown_script / step matching, just the branch's typed
+// setup+action steps run in a workdir-rooted sandbox.
+//
+// This is the path Godot/Node/Ruby/etc. take — no language-specific Driver
+// implementation is needed because the host CLI ("godot --headless --script
+// foo.gd", "node -e", "ruby -e", …) is just a shell invocation, and
+// SubprocessDriver with Tool=shell already executes those.
+func runUnitSubprocess(e *Entry) Result {
+	res := Result{UnitID: e.UnitID, Tier: "unit"}
+
+	if e.Verification.Runtime == nil || e.Verification.Runtime.Tool == "" {
+		return rejected(res, "verification_runtime_missing",
+			"verification.runtime.tool is required when isolation: subprocess "+
+				"(names which CLI to drive: shell, sqlite, ...)")
+	}
+	tool := e.Verification.Runtime.Tool
+	if !unitSubprocessSupportedTools[tool] {
+		return tierUnsupported(res, "runtime_unsupported", fmt.Sprintf(
+			"verification.runtime.tool %q is not implemented in this verifier "+
+				"build at unit-tier — shell + sqlite ship first; postgres / "+
+				"redis / git / docker land in follow-up commits",
+			tool,
+		))
+	}
+
+	// path-extract is a no-op at subprocess unit-tier: SubprocessDriver
+	// returns last-step stdout as a string-typed $RESULT, so dotted-key
+	// dict path extraction does not apply.
+	prep, prepReason := prepareBranches(e, false)
+	if prepReason != nil {
+		return rejectedReasons(res, []Reason{*prepReason})
+	}
+
+	if r := validateTimeoutSeconds(e); r != nil {
+		return rejectedReasons(res, []Reason{*r})
+	}
+	timeout := e.Verification.TimeoutSeconds
+
+	failedRes, failedDriver, _, failedReason := runUnitSubprocessBranch(
+		"failed_approach", tool, prep.FailedSetup, prep.FailedAction, prep.FailedInputs, timeout)
+	if failedReason != nil {
+		return rejectedReasons(res, []Reason{*failedReason})
+	}
+	defer cleanupUnitSubprocessSandbox(failedDriver)
+
+	workingRes, workingDriver, _, workingReason := runUnitSubprocessBranch(
+		"working_approach", tool, prep.WorkingSetup, prep.WorkingAction, prep.WorkingInputs, timeout)
+	if workingReason != nil {
+		return rejectedReasons(res, []Reason{*workingReason})
+	}
+	defer cleanupUnitSubprocessSandbox(workingDriver)
+
+	var reasons []Reason
+	reasons = append(reasons, matchOutcome(branchFailed, failedRes, e.Verification.Differential)...)
+	reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
+	if len(reasons) > 0 {
+		return rejectedReasons(res, reasons)
+	}
+
+	baseline := mutationBaseline{
+		Failed: branchBaseline{
+			Setup:  prep.FailedSetup,
+			Action: prep.FailedAction,
+			Inputs: prep.FailedInputs,
+			Result: failedRes,
+			Driver: failedDriver,
+		},
+		Working: branchBaseline{
+			Setup:  prep.WorkingSetup,
+			Action: prep.WorkingAction,
+			Inputs: prep.WorkingInputs,
+			Result: workingRes,
+			Driver: workingDriver,
+		},
+		Diff:    e.Verification.Differential,
+		Timeout: timeout,
+	}
+
+	mutReasons, supported := runUnitSubprocessMutations(e, baseline, tool)
+	if !supported {
+		return tierUnsupportedReasons(res, mutReasons)
+	}
+	if len(mutReasons) > 0 {
+		return rejectedReasons(res, mutReasons)
+	}
+
+	res.Status = "verified"
+	return res
+}
+
+// runUnitSubprocessBranch allocates a fresh tmpdir, constructs a
+// SubprocessDriver pointed at it, and runs the branch's setup+action.
+// Mirrors runReexecuteBranch but without the cassette setup_script step.
+// Returns the action's ExecResult, the driver instance (so the caller can
+// defer the sandbox cleanup), the underlying runner sentinel error when
+// relevant, and a non-nil Reason when the run failed.
+func runUnitSubprocessBranch(branchName, tool string, setup, action []runner.Step, inputs map[string]any, timeout float64) (runner.ExecResult, runner.SubprocessDriver, error, *Reason) {
+	workdir, err := os.MkdirTemp("", "runlog-unit-")
+	if err != nil {
+		r := Reason{
+			Code:    "sandbox_alloc_failed",
+			Message: fmt.Sprintf("%s: %v", branchName, err),
+		}
+		return runner.ExecResult{}, runner.SubprocessDriver{}, nil, &r
+	}
+	driver := runner.SubprocessDriver{Tool: tool, Workdir: workdir}
+
+	res, err := driver.Run(setup, action, inputs, timeout)
+	if err != nil {
+		_ = os.RemoveAll(workdir)
+		code := unitSubprocessRunErrorCode(err, "branch_runner_error")
+		r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, err)}
+		return runner.ExecResult{}, driver, err, &r
+	}
+	return res, driver, nil, nil
+}
+
+// cleanupUnitSubprocessSandbox os.RemoveAll's the workdir. Safe to call with a
+// zero-value SubprocessDriver — the os.RemoveAll on an empty path is a no-op.
+// No teardown_script: unit-tier subprocess has no cassette.
+func cleanupUnitSubprocessSandbox(driver runner.SubprocessDriver) {
+	if driver.Workdir == "" {
+		return
+	}
+	_ = os.RemoveAll(driver.Workdir)
+}
+
+// unitSubprocessRunErrorCode maps a SubprocessDriver error to the Reason.Code
+// unit-tier subprocess emits. Mirrors reexecuteRunErrorCode but uses
+// `input_invalid_name` (no cassette to scope the error to) and reuses the rest
+// of the error→code mapping wholesale so behaviour stays uniform across tiers.
+func unitSubprocessRunErrorCode(err error, defaultCode string) string {
+	switch {
+	case errors.Is(err, runner.ErrInputInvalidName):
+		return "input_invalid_name"
+	case errors.Is(err, runner.ErrInterpreterMissing):
+		return "runtime_unavailable"
+	case errors.Is(err, runner.ErrTimeout):
+		return "branch_timeout"
+	case errors.Is(err, runner.ErrLanguageUnsupported), errors.Is(err, runner.ErrSubprocessTool):
+		return "language_not_yet_implemented"
+	}
+	return defaultCode
+}
+
+// runUnitSubprocessMutations applies each declared mutation in a fresh
+// per-mutation tmpdir and verifies the outcome matches the declared
+// expectation. Cassette-response mutations are unsupported (no HTTP responses
+// at unit-tier subprocess). Mirrors runReexecuteMutations.
+func runUnitSubprocessMutations(e *Entry, b mutationBaseline, tool string) ([]Reason, bool) {
+	return iterateMutations(e, func(m Mutation, i int) ([]Reason, bool) {
+		return runOneUnitSubprocessMutation(b, m, i, tool)
+	})
+}
+
+// runOneUnitSubprocessMutation mirrors runOneReexecuteMutation but with no
+// cassette setup_script to re-apply per-mutation: each mutation just gets a
+// fresh tmpdir, the branch's typed setup steps run inside the SubprocessDriver
+// before the mutated action.
+func runOneUnitSubprocessMutation(b mutationBaseline, m Mutation, idx int, tool string) ([]Reason, bool) {
+	if isCassetteResponseStrategy(m.Strategy) {
+		return []Reason{{
+			Code: "mutation_strategy_unsupported",
+			Message: fmt.Sprintf(
+				"mutation #%d strategy %q targets a cassette response, but unit-tier "+
+					"subprocess has no HTTP responses to perturb. Use mutate_fixture / "+
+					"set_literal_value / swap_* / remove_kwarg / drop_flag at this tier",
+				idx+1, m.Strategy),
+		}}, false
+	}
+	strat, ok := strategies[m.Strategy]
+	if !ok {
+		return strategyUnsupportedReason(idx, m.Strategy), false
+	}
+
+	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
+		mutInputs, mutAction, err := strat.apply(baseline, m)
+		if err != nil {
+			return []Reason{{
+				Code: "mutation_target_invalid",
+				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
+					idx+1, m.Strategy, branch, err),
+			}}
+		}
+
+		// Per-mutation fresh sandbox. Wrapped in a closure so cleanup runs
+		// deterministically at the end of *this* mutation rather than
+		// accumulating across iterations. Mirrors runOneReexecuteMutation.
+		return func() []Reason {
+			got, mutDriver, runErr, runReason := runUnitSubprocessBranch(
+				fmt.Sprintf("mutation #%d (%s) on %s", idx+1, m.Strategy, branch),
+				tool, baseline.Setup, mutAction, mutInputs, b.Timeout)
+			defer cleanupUnitSubprocessSandbox(mutDriver)
+
+			if runReason != nil {
+				if runErr != nil && isEnvErr(runErr) {
+					return []Reason{{
+						Code:    "mutation_runner_error",
+						Message: runReason.Message,
+					}}
+				}
+				got = synthesizeMutationCrashMessage(runReason.Message)
+			}
+
+			actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
+			if actual == expected {
+				return nil
+			}
+			if expected == outcomeFail &&
+				actual == outcomeUnchanged &&
+				discriminatingStrategies[m.Strategy] &&
+				!stepBodiesEqual(baseline.Action, mutAction) {
+				return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, "source")}
+			}
+			return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
+		}()
+	})
+	return reasons, true
 }

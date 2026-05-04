@@ -1,5 +1,5 @@
-github.com/runlog-org/runlog-schema v0.1.0 h1:6MzT9nuKs8kI+dgxKTJglzGVLneCcIVF/cjxcBi8wUw=
-github.com/runlog-org/runlog-schema v0.1.0/go.mod h1:8JtjrDrYhJm77BC/MUKoPOwRf7H38bNaSu9wzvKdzsM=
+github.com/runlog-org/runlog-schema v0.3.0 h1:P5FbTe3oxQkMcUAs0sOIeyc2XiljkfQX/FuvYf8P3lg=
+github.com/runlog-org/runlog-schema v0.3.0/go.mod h1:8JtjrDrYhJm77BC/MUKoPOwRf7H38bNaSu9wzvKdzsM=
 github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 h1:lZUw3E0/J3roVtGQ+SCrUrg3ON6NgVqpn3+iol9aGu4=
 github.com/santhosh-tekuri/jsonschema/v5 v5.3.1/go.mod h1:uToXkOrWAZ6/Oc07xWQrPOhJotwFIyu2bBVN41fcDUY=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=

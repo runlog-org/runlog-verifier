@@ -114,13 +114,166 @@ func TestRunUnitMissingIsolation(t *testing.T) {
 	}
 }
 
-func TestRunUnitSubprocessIsolation(t *testing.T) {
-	// Schema-recognised but unimplemented in this build — must surface
-	// isolation_unsupported with the requested isolation in the message
-	// so the submitter knows it's an environment / driver gap, not an
-	// entry authoring bug. No python3 needed; the dispatcher returns
-	// before any subprocess is spawned.
+func TestRunUnitSubprocessMissingRuntime(t *testing.T) {
+	// `isolation: subprocess` requires a `verification.runtime.tool`
+	// declaration to know which CLI to drive. Without it, the entry is
+	// well-formed YAML but unverifiable — surface rejected with
+	// verification_runtime_missing so the submitter fixes the entry
+	// rather than thinking the verifier build is incomplete.
 	yaml := strings.Replace(unitGreenYAML, "isolation: function", "isolation: subprocess", 1)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "verification_runtime_missing") {
+		t.Fatalf("expected verification_runtime_missing, got %v", res.Reasons)
+	}
+}
+
+// unitSubprocessShellYAML is a minimal unit-tier entry that runs end-to-end
+// through the SubprocessDriver with tool=shell. Each branch echoes a
+// distinct stdout string; the differential block matches on those exact
+// strings (SubprocessDriver returns last-step stdout as a string-typed
+// $RESULT). This is the path Godot/Node/Ruby/etc. take — no language-
+// specific driver, just the host CLI.
+const unitSubprocessShellYAML = `
+unit_id: unit-subprocess-shell-greenpath
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: echoes failure
+  setup: []
+  action:
+    - { type: code, lang: shell, body: "echo failed-output" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: echoes success
+  setup: []
+  action:
+    - { type: code, lang: shell, body: "echo working-output" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: subprocess
+  runtime: { tool: shell }
+  differential:
+    failed_branch_must_return: { type: string, value_equals: "failed-output\n" }
+    working_branch_must_return: { type: string, value_equals: "working-output\n" }
+  timeout_seconds: 5
+`
+
+func skipIfNoShell(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not on PATH")
+	}
+}
+
+func TestRunUnitSubprocessShellVerified(t *testing.T) {
+	skipIfNoShell(t)
+	res, err := Run([]byte(unitSubprocessShellYAML))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
+	}
+	if res.Tier != "unit" {
+		t.Fatalf("tier=%q, want unit", res.Tier)
+	}
+}
+
+// unitSubprocessMutationsYAML proves the per-mutation fresh-tmpdir lifecycle
+// works for unit-tier subprocess. Two mutations on the failed branch:
+//   - swap a comment-only token  → output unchanged → expected unchanged
+//   - swap the literal output    → branch becomes indistinguishable from
+//                                  working → expected fail
+// Mirrors the "discriminating + non-discriminating mutation" pattern the
+// schema enforces at submission time, but exercises the per-mutation
+// sandbox isolation that's the load-bearing piece for shell/subprocess.
+const unitSubprocessMutationsYAML = `
+unit_id: unit-subprocess-shell-mutations
+domain: [test]
+version_constraints: { spec: { name: test } }
+failed_approach:
+  description: echoes failure with a trailing comment
+  setup: []
+  action:
+    - { type: code, lang: shell, body: "echo failed-output # commentmark" }
+  assertion: { type: returns, expect: fail }
+working_approach:
+  description: echoes success
+  setup: []
+  action:
+    - { type: code, lang: shell, body: "echo working-output" }
+  assertion: { type: returns, expect: success }
+verification:
+  type: unit
+  isolation: subprocess
+  runtime: { tool: shell }
+  differential:
+    failed_branch_must_return: { type: string, value_equals: "failed-output\n" }
+    working_branch_must_return: { type: string, value_equals: "working-output\n" }
+  mutations:
+    - strategy: swap_identifier
+      target: action
+      branch: failed_approach
+      token: commentmark
+      new_value: remark
+      expected_branch_outcome: { failed_approach: unchanged }
+    - strategy: swap_identifier
+      target: action
+      branch: failed_approach
+      token: failed-output
+      new_value: working-output
+      expected_branch_outcome: { failed_approach: fail }
+  timeout_seconds: 5
+`
+
+func TestRunUnitSubprocessShellWithMutations(t *testing.T) {
+	skipIfNoShell(t)
+	res, err := Run([]byte(unitSubprocessMutationsYAML))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, reasons=%v", res.Status, res.Reasons)
+	}
+}
+
+func TestRunUnitSubprocessMutationOutcomeMismatch(t *testing.T) {
+	// Sanity: if the mutation expectation is wrong, we surface
+	// mutation_outcome_mismatch (proves the per-mutation sandbox actually
+	// runs, isn't a no-op that returns "verified" regardless).
+	skipIfNoShell(t)
+	yaml := strings.Replace(unitSubprocessMutationsYAML,
+		"expected_branch_outcome: { failed_approach: fail }",
+		"expected_branch_outcome: { failed_approach: unchanged }",
+		1)
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "rejected" {
+		t.Fatalf("status=%q, want rejected (reasons=%v)", res.Status, res.Reasons)
+	}
+	if !hasReason(res.Reasons, "mutation_outcome_mismatch") {
+		t.Fatalf("expected mutation_outcome_mismatch, got %v", res.Reasons)
+	}
+}
+
+func TestRunUnitSubprocessUnsupportedTool(t *testing.T) {
+	// tool=postgres is in the schema enum but not implemented in this
+	// build — surface tier_unsupported with runtime_unsupported so the
+	// submitter knows the entry is well-formed but waiting on driver
+	// work. Mirrors integration-reexecute's runtime_unsupported behavior.
+	yaml := strings.Replace(unitSubprocessShellYAML,
+		"runtime: { tool: shell }",
+		"runtime: { tool: postgres }",
+		1)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -128,18 +281,8 @@ func TestRunUnitSubprocessIsolation(t *testing.T) {
 	if res.Status != "tier_unsupported" {
 		t.Fatalf("status=%q, want tier_unsupported (reasons=%v)", res.Status, res.Reasons)
 	}
-	if !hasReason(res.Reasons, "isolation_unsupported") {
-		t.Fatalf("expected isolation_unsupported, got %v", res.Reasons)
-	}
-	found := false
-	for _, r := range res.Reasons {
-		if r.Code == "isolation_unsupported" && strings.Contains(r.Message, `"subprocess"`) {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected isolation_unsupported message naming \"subprocess\", got %v", res.Reasons)
+	if !hasReason(res.Reasons, "runtime_unsupported") {
+		t.Fatalf("expected runtime_unsupported, got %v", res.Reasons)
 	}
 }
 
