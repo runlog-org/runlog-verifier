@@ -92,6 +92,8 @@ Usage:
         host fingerprint, sign a canonical-JSON bundle, and emit JSON to
         stdout. unit / integration tiers are accepted as well-formed but
         exit with status tier_unsupported until their runners land.
+        Requires RUNLOG_API_KEY (same as `+"`register`"+`); pre-flight checks the
+        server has the matching pubkey on file before signing.
 
   runlog-verifier keygen
         Generate a fresh Ed25519 keypair and emit JSON to stdout.
@@ -145,6 +147,7 @@ func runVerify(args []string) int {
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: runlog-verifier verify <entry.yaml>")
 	}
+	serverFlag := fs.String("server", "", "preflight server base URL (default: $RUNLOG_API_URL or "+defaultRegisterServer+")")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -175,7 +178,7 @@ func runVerify(args []string) int {
 	// Load the persistent keypair registered with the server. Refuse to
 	// fall back to an ephemeral key — the server-side signature check
 	// would silently fail in a way that's hard to diagnose.
-	priv, _, err := keystore.Load()
+	priv, pub, err := keystore.Load()
 	if err != nil {
 		if errors.Is(err, keystore.ErrNotFound) {
 			fmt.Fprintln(os.Stderr,
@@ -184,6 +187,24 @@ func runVerify(args []string) int {
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "verify: load key: %v\n", err)
+		return 2
+	}
+
+	// Pre-flight: confirm the server has our pubkey on file before signing.
+	// Refuses to produce a signature on any mismatch / missing pubkey /
+	// auth / network failure — closes the silent-bounce failure mode where
+	// the server rejects signed submits with pubkey_not_registered while
+	// the verifier reports "signed OK".
+	apiKey := os.Getenv("RUNLOG_API_KEY")
+	if apiKey == "" {
+		fmt.Fprintln(os.Stderr,
+			"verify: RUNLOG_API_KEY is not set. "+
+				"Get one at https://runlog.org/register and export it before retrying.")
+		return 1
+	}
+	server := resolvePreflightServer(*serverFlag)
+	if err := checkServerPubkey(server, apiKey, pub); err != nil {
+		fmt.Fprintf(os.Stderr, "verify: %v\n", err)
 		return 2
 	}
 
