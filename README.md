@@ -1,20 +1,20 @@
 # Runlog Verifier — Signed Verification Agent
 
-> Part of the **[Runlog](https://github.com/runlog-org)** project — see the [project home](https://github.com/runlog-org) for the overview.
+> Part of the **[Runlog](https://github.com/runlog-org)** project. See the [project home](https://github.com/runlog-org) for the overview.
 
-**Repo:** [`runlog-org/runlog-verifier`](https://github.com/runlog-org/runlog-verifier) — public, Apache-2.0
+**Repo:** [`runlog-org/runlog-verifier`](https://github.com/runlog-org/runlog-verifier) (public, Apache-2.0)
 **Language:** Go
-**Role:** signed verification agent — runs both branches of an entry locally, applies mutation testing, and signs a tamper-evident bundle. The verification model is summarised at [runlog.org/why-verification/](https://runlog.org/why-verification/).
+**Role:** signed verification agent. Runs both branches of an entry locally and signs the resulting bundle. The verification model is summarised at [runlog.org/why-verification/](https://runlog.org/why-verification/).
 
 > **About this project:** Runlog is a hobby side project by [Volker Otto](https://volkerotto.net) — not a commercial product today. A paid model is not ruled out for a later stage. See [About this project](https://runlog.org/#about) for the canonical framing.
 
-Tamper-evident, reproducible-build binary distributed via package managers (`brew install runlog-verifier`, apt). Wraps test execution on the submitter's machine, runs both branches (§5.3), applies mutation testing, records integration cassettes (§7.5), and signs the bundle before submission. Target size: ~200 lines, fully auditable.
+Reproducible-build binary distributed via package managers (`brew install runlog-verifier`, apt). Wraps test execution on the submitter's machine, runs both branches (§5.3), records integration cassettes (§7.5), and signs the bundle before submission. Target size: ~200 lines.
 
 **Must be public.** The trust model depends on anyone being able to verify that the binary matches the source (§5.4).
 
 ## Install / Update
 
-One-liner — fetches the latest release, verifies SHA256, drops the binary at
+Fetches the latest release, verifies SHA256, and drops the binary at
 `~/.local/bin/runlog-verifier`. Re-run to update; idempotent if you're
 already on the latest version:
 
@@ -63,8 +63,8 @@ First-time setup on a fresh machine:
 
 Reproducible-build flags (`-trimpath -buildvcs=false`) are wired into
 the Makefile and validated on every push by
-[`.github/workflows/verifier.yml`](./.github/workflows/verifier.yml) —
-two consecutive builds must hash identically or CI fails. Signed-release
+[`.github/workflows/verifier.yml`](./.github/workflows/verifier.yml).
+Two consecutive builds must hash identically or CI fails. Signed-release
 publishing of tagged binaries is deferred to the first Phase 2 release.
 
 ## CLI status
@@ -75,7 +75,7 @@ mutation discrimination (§5.3 step 4), and the primitives allow-list
 all run on every `verify` call, producing a signed JSON bundle.
 
 `unit` and `integration` tiers parse but exit with status
-`tier_unsupported` (exit code 4) — subprocess execution and cassette
+`tier_unsupported` (exit code 4). Subprocess execution and cassette
 replay are still to land in Phase 2. The CLI's output shape is stable
 and the server's `verification_signature` parameter already accepts
 (and ignores) bundles in this format.
