@@ -106,9 +106,18 @@ func Verify(s Signed) (bool, error) {
 		return false, fmt.Errorf("verify: decode public key: %w", err)
 	}
 
+	// Length checks before ed25519.Verify: the stdlib rejects wrong-length
+	// inputs by returning false but with no diagnostic, so a corrupted
+	// signature/key would surface as a generic verification failure. Naming
+	// the size mismatch explicitly distinguishes "bytes were tampered with"
+	// from "key is correct but Ed25519.Verify said no".
 	if len(pub) != ed25519.PublicKeySize {
 		return false, fmt.Errorf("verify: public key must be %d bytes, got %d",
 			ed25519.PublicKeySize, len(pub))
+	}
+	if len(sig) != ed25519.SignatureSize {
+		return false, fmt.Errorf("verify: signature must be %d bytes, got %d",
+			ed25519.SignatureSize, len(sig))
 	}
 
 	ok := ed25519.Verify(ed25519.PublicKey(pub), canonical, sig)

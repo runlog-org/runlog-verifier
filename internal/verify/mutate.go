@@ -48,18 +48,6 @@ func (k branchKind) specKeys() (retKey, raiseKey string) {
 	return "working_branch_must_return", "working_branch_must_raise"
 }
 
-// parseBranchKind maps a schema-side branch key to its enum. ok is false for
-// unknown values (including ""), letting callers degrade gracefully.
-func parseBranchKind(s string) (branchKind, bool) {
-	switch s {
-	case "failed_approach":
-		return branchFailed, true
-	case "working_approach":
-		return branchWorking, true
-	}
-	return branchUnknown, false
-}
-
 // branchBaseline captures one branch's un-mutated execution context so a
 // mutation can be applied as a delta against it.
 //

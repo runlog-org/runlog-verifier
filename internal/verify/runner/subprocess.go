@@ -422,17 +422,28 @@ func (d SubprocessDriver) execCommand(name string, args []string, stdin string, 
 // $-prefixed key is exposed as the bare name (so $WORKDIR becomes WORKDIR=…
 // in the subprocess env) so shell's own $-expansion picks it up. The host's
 // PATH is preserved so `sh`, `sqlite3`, etc. resolve.
+//
+// Input keys are sorted before assembly so two equal inputs maps produce
+// byte-identical env slices; non-deterministic map iteration would otherwise
+// reshuffle the env order across runs and complicate reproducibility (a
+// child process that snapshots env-var order would see drift between
+// equivalent invocations).
 func buildEnv(inputs map[string]any) []string {
 	env := []string{"PATH=" + os.Getenv("PATH")}
 	if home := os.Getenv("HOME"); home != "" {
 		env = append(env, "HOME="+home)
 	}
-	for k, v := range inputs {
+	keys := make([]string, 0, len(inputs))
+	for k := range inputs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
 		bare := strings.TrimPrefix(k, "$")
 		if bare == "" {
 			continue
 		}
-		env = append(env, fmt.Sprintf("%s=%v", bare, v))
+		env = append(env, fmt.Sprintf("%s=%v", bare, inputs[k]))
 	}
 	return env
 }
