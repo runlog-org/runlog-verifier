@@ -41,14 +41,14 @@ type Assertion struct {
 
 // Verification mirrors the schema's verification block.
 type Verification struct {
-	Type                string         `yaml:"type"`
-	Isolation           string         `yaml:"isolation"`
-	PrimitivesRequired  []string       `yaml:"primitives_required"`
-	Differential        map[string]any `yaml:"differential"`
-	Mutations           []Mutation     `yaml:"mutations"`
-	TimeoutSeconds      float64        `yaml:"timeout_seconds"`
-	Cassette            map[string]any `yaml:"cassette"`
-	Runtime             *RuntimeSpec   `yaml:"runtime"`
+	Type               string         `yaml:"type"`
+	Isolation          string         `yaml:"isolation"`
+	PrimitivesRequired []string       `yaml:"primitives_required"`
+	Differential       map[string]any `yaml:"differential"`
+	Mutations          []Mutation     `yaml:"mutations"`
+	TimeoutSeconds     float64        `yaml:"timeout_seconds"`
+	Cassette           map[string]any `yaml:"cassette"`
+	Runtime            *RuntimeSpec   `yaml:"runtime"`
 }
 
 // RuntimeSpec mirrors verification.runtime — the unit-tier counterpart of
@@ -64,12 +64,12 @@ type RuntimeSpec struct {
 // expected_branch_outcome are read as raw maps so the type-discriminated
 // schema rule can be evaluated without forcing a single shape.
 type Mutation struct {
-	Strategy               string            `yaml:"strategy"`
-	Target                 string            `yaml:"target"`
-	NewValue               any               `yaml:"new_value"`
-	Token                  string            `yaml:"token"`
-	Field                  string            `yaml:"action,omitempty"`
-	Branch                 string            `yaml:"branch"`
-	ExpectedResult         string            `yaml:"expected_result"`
-	ExpectedBranchOutcome  map[string]string `yaml:"expected_branch_outcome"`
+	Strategy              string            `yaml:"strategy"`
+	Target                string            `yaml:"target"`
+	NewValue              any               `yaml:"new_value"`
+	Token                 string            `yaml:"token"`
+	Field                 string            `yaml:"action,omitempty"`
+	Branch                string            `yaml:"branch"`
+	ExpectedResult        string            `yaml:"expected_result"`
+	ExpectedBranchOutcome map[string]string `yaml:"expected_branch_outcome"`
 }

@@ -26,11 +26,11 @@ import (
 // that order is the canonical serialization — do not reorder without bumping
 // the bundle format version.
 type Bundle struct {
-	UnitID       string            `json:"unit_id"`
-	Status       string            `json:"status"`
-	Tier         string            `json:"tier,omitempty"`
-	Reasons      []BundleReason    `json:"reasons,omitempty"`
-	Fingerprint  map[string]string `json:"fingerprint"`
+	UnitID      string            `json:"unit_id"`
+	Status      string            `json:"status"`
+	Tier        string            `json:"tier,omitempty"`
+	Reasons     []BundleReason    `json:"reasons,omitempty"`
+	Fingerprint map[string]string `json:"fingerprint"`
 	// Future: TestResults, MutationResults, CassettePaths
 }
 

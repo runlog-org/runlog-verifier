@@ -58,9 +58,9 @@ func checkBranchesDiscriminating(e *Entry) []Reason {
 
 // checkMutationStructure enforces the schema's submission-time rules 1-3
 // from schema/entry.schema.yaml lines 583-587:
-//   1. At least one mutation with strategy: mutate_fixture
-//   2. At least one mutation expecting result: fail
-//   3. At least one mutation expecting result: unchanged
+//  1. At least one mutation with strategy: mutate_fixture
+//  2. At least one mutation expecting result: fail
+//  3. At least one mutation expecting result: unchanged
 //
 // Rules 2-3 accept either expected_result or per-branch outcomes
 // containing the relevant value — the schema's oneOf permits both shapes.

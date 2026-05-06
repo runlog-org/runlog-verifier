@@ -15,8 +15,10 @@ import (
 
 // TestSchemaOracle exercises the schema-as-test-oracle slice of F31:
 // for each canonical sample entry, both
-//   (a) the entry parses cleanly through verify.Run, AND
-//   (b) the entry validates against the canonical entry schema.
+//
+//	(a) the entry parses cleanly through verify.Run, AND
+//	(b) the entry validates against the canonical entry schema.
+//
 // Either side breaking — verifier accepting a non-schema-valid entry, or a
 // schema-valid entry crashing the loader — is a test failure.
 //

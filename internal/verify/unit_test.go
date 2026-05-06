@@ -190,7 +190,8 @@ func TestRunUnitSubprocessShellVerified(t *testing.T) {
 // works for unit-tier subprocess. Two mutations on the failed branch:
 //   - swap a comment-only token  → output unchanged → expected unchanged
 //   - swap the literal output    → branch becomes indistinguishable from
-//                                  working → expected fail
+//     working → expected fail
+//
 // Mirrors the "discriminating + non-discriminating mutation" pattern the
 // schema enforces at submission time, but exercises the per-mutation
 // sandbox isolation that's the load-bearing piece for shell/subprocess.
