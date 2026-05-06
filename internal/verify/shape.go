@@ -208,26 +208,19 @@ type preparedBranches struct {
 // malformed_return_path) stay stable.
 func prepareBranches(e *Entry, appendPathExtract bool) (preparedBranches, *Reason) {
 	var p preparedBranches
+	var err error
 
-	if v, err := stepsFromAny(e.FailedApproach.Setup); err != nil {
+	if p.FailedSetup, err = stepsFromAny(e.FailedApproach.Setup); err != nil {
 		return p, shapeReason("failed_setup", err)
-	} else {
-		p.FailedSetup = v
 	}
-	if v, err := stepsFromAny(e.FailedApproach.Action); err != nil {
+	if p.FailedAction, err = stepsFromAny(e.FailedApproach.Action); err != nil {
 		return p, shapeReason("failed_action", err)
-	} else {
-		p.FailedAction = v
 	}
-	if v, err := stepsFromAny(e.WorkingApproach.Setup); err != nil {
+	if p.WorkingSetup, err = stepsFromAny(e.WorkingApproach.Setup); err != nil {
 		return p, shapeReason("working_setup", err)
-	} else {
-		p.WorkingSetup = v
 	}
-	if v, err := stepsFromAny(e.WorkingApproach.Action); err != nil {
+	if p.WorkingAction, err = stepsFromAny(e.WorkingApproach.Action); err != nil {
 		return p, shapeReason("working_action", err)
-	} else {
-		p.WorkingAction = v
 	}
 
 	if appendPathExtract {

@@ -133,8 +133,9 @@ func runIntegration(e *Entry) Result {
 	if prepReason != nil {
 		return rejectedReasons(res, []Reason{*prepReason})
 	}
-	failedSetup, failedAction := prep.FailedSetup, prep.FailedAction
-	workingSetup, workingAction := prep.WorkingSetup, prep.WorkingAction
+	// failedInputs / workingInputs are re-bound by runStubbedBranch (it injects
+	// $ENDPOINT into a fresh inputs copy); the locals carry the per-branch run's
+	// final inputs through to the mutation baseline below.
 	failedInputs, workingInputs := prep.FailedInputs, prep.WorkingInputs
 
 	if r := validateTimeoutSeconds(e); r != nil {
@@ -175,11 +176,11 @@ func runIntegration(e *Entry) Result {
 	failedHasRun := false
 	if len(failedSeq) > 0 {
 		var (
-			runErr error
 			rsns   []Reason
+			runErr error
 		)
-		failedRes, runErr, rsns, failedInputs = runStubbedBranch(
-			"failed_approach", cas, failedSeq, failedSetup, failedAction, failedInputs, timeout)
+		failedRes, rsns, failedInputs, runErr = runStubbedBranch(
+			"failed_approach", cas, failedSeq, prep.FailedSetup, prep.FailedAction, failedInputs, timeout)
 		if runErr != nil {
 			return runnerError(res, "failed_approach", runErr)
 		}
@@ -194,11 +195,11 @@ func runIntegration(e *Entry) Result {
 	workingHasRun := false
 	if len(workingSeq) > 0 {
 		var (
-			runErr error
 			rsns   []Reason
+			runErr error
 		)
-		workingRes, runErr, rsns, workingInputs = runStubbedBranch(
-			"working_approach", cas, workingSeq, workingSetup, workingAction, workingInputs, timeout)
+		workingRes, rsns, workingInputs, runErr = runStubbedBranch(
+			"working_approach", cas, workingSeq, prep.WorkingSetup, prep.WorkingAction, workingInputs, timeout)
 		if runErr != nil {
 			return runnerError(res, "working_approach", runErr)
 		}
@@ -234,15 +235,15 @@ func runIntegration(e *Entry) Result {
 	// integrationStrategy below.
 	baseline := mutationBaseline{
 		Failed: branchBaseline{
-			Setup:  failedSetup,
-			Action: failedAction,
+			Setup:  prep.FailedSetup,
+			Action: prep.FailedAction,
 			Inputs: failedInputs,
 			Result: failedRes,
 			Driver: runner.PythonDriver{},
 		},
 		Working: branchBaseline{
-			Setup:  workingSetup,
-			Action: workingAction,
+			Setup:  prep.WorkingSetup,
+			Action: prep.WorkingAction,
 			Inputs: workingInputs,
 			Result: workingRes,
 			Driver: runner.PythonDriver{},
@@ -275,10 +276,11 @@ func runIntegration(e *Entry) Result {
 // (a function-scope defer in the caller would keep them alive across
 // subsequent branches and the mutation loop).
 //
-// Returns the exec result, an environmental error (timeout / missing
-// interpreter — surfaced via runnerError by the caller), any cassette-shape
-// rejection reasons (unmatched request / sequence underrun), and the
-// $ENDPOINT-bound inputs map for re-use by the mutation loop.
+// Returns the exec result, any cassette-shape rejection reasons (unmatched
+// request / sequence underrun), the $ENDPOINT-bound inputs map for re-use by
+// the mutation loop, and an environmental error (timeout / missing
+// interpreter — surfaced via runnerError by the caller). Error is the last
+// return per Go convention.
 func runStubbedBranch(
 	branchName string,
 	cas *cassette.Cassette,
@@ -286,19 +288,19 @@ func runStubbedBranch(
 	setup, action []runner.Step,
 	inputs map[string]any,
 	timeout float64,
-) (runner.ExecResult, error, []Reason, map[string]any) {
+) (runner.ExecResult, []Reason, map[string]any, error) {
 	stub := cassette.NewStub(cas, seq)
 	defer stub.Close()
 	inputs = withEndpoint(inputs, stub.URL())
 
 	res, err := runner.RunPython(setup, action, inputs, timeout)
 	if err != nil {
-		return runner.ExecResult{}, err, nil, inputs
+		return runner.ExecResult{}, nil, inputs, err
 	}
 	if reasons := stubReasons(branchName, stub); len(reasons) > 0 {
-		return res, nil, reasons, inputs
+		return res, reasons, inputs, nil
 	}
-	return res, nil, nil, inputs
+	return res, nil, inputs, nil
 }
 
 // withEndpoint returns a fresh inputs map with $ENDPOINT bound to url. Existing

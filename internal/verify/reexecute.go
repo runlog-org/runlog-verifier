@@ -121,9 +121,6 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	if prepReason != nil {
 		return rejectedReasons(res, []Reason{*prepReason})
 	}
-	failedSetup, failedAction := prep.FailedSetup, prep.FailedAction
-	workingSetup, workingAction := prep.WorkingSetup, prep.WorkingAction
-	failedInputs, workingInputs := prep.FailedInputs, prep.WorkingInputs
 
 	if r := validateTimeoutSeconds(e); r != nil {
 		return rejectedReasons(res, []Reason{*r})
@@ -133,19 +130,19 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 
 	// ── Failed branch run ─────────────────────────────────────────────
 	failedRes, failedDriver, _, failedReason := runReexecuteBranch(
-		"failed_approach", cas, failedSetup, failedAction, failedInputs, timeout)
+		"failed_approach", cas, prep.FailedSetup, prep.FailedAction, prep.FailedInputs, timeout)
 	if failedReason != nil {
 		return rejectedReasons(res, []Reason{*failedReason})
 	}
-	defer cleanupReexecuteSandbox(failedDriver, cas, failedInputs, timeout)
+	defer cleanupReexecuteSandbox(failedDriver, cas, prep.FailedInputs, timeout)
 
 	// ── Working branch run ────────────────────────────────────────────
 	workingRes, workingDriver, _, workingReason := runReexecuteBranch(
-		"working_approach", cas, workingSetup, workingAction, workingInputs, timeout)
+		"working_approach", cas, prep.WorkingSetup, prep.WorkingAction, prep.WorkingInputs, timeout)
 	if workingReason != nil {
 		return rejectedReasons(res, []Reason{*workingReason})
 	}
-	defer cleanupReexecuteSandbox(workingDriver, cas, workingInputs, timeout)
+	defer cleanupReexecuteSandbox(workingDriver, cas, prep.WorkingInputs, timeout)
 
 	// ── Outcome matching ──────────────────────────────────────────────
 	var reasons []Reason
@@ -158,16 +155,16 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	// ── Mutation testing ──────────────────────────────────────────────
 	baseline := mutationBaseline{
 		Failed: branchBaseline{
-			Setup:  failedSetup,
-			Action: failedAction,
-			Inputs: failedInputs,
+			Setup:  prep.FailedSetup,
+			Action: prep.FailedAction,
+			Inputs: prep.FailedInputs,
 			Result: failedRes,
 			Driver: failedDriver,
 		},
 		Working: branchBaseline{
-			Setup:  workingSetup,
-			Action: workingAction,
-			Inputs: workingInputs,
+			Setup:  prep.WorkingSetup,
+			Action: prep.WorkingAction,
+			Inputs: prep.WorkingInputs,
 			Result: workingRes,
 			Driver: workingDriver,
 		},
