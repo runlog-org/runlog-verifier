@@ -1,7 +1,10 @@
 github.com/runlog-org/runlog-schema v0.3.0 h1:P5FbTe3oxQkMcUAs0sOIeyc2XiljkfQX/FuvYf8P3lg=
 github.com/runlog-org/runlog-schema v0.3.0/go.mod h1:8JtjrDrYhJm77BC/MUKoPOwRf7H38bNaSu9wzvKdzsM=
+github.com/runlog-org/runlog-schema v0.3.1 h1:y1fkSIjBnHCTItRr1V8Sp8h6KoDBfDv40Al96un8xoQ=
+github.com/runlog-org/runlog-schema v0.3.1/go.mod h1:8JtjrDrYhJm77BC/MUKoPOwRf7H38bNaSu9wzvKdzsM=
 github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 h1:lZUw3E0/J3roVtGQ+SCrUrg3ON6NgVqpn3+iol9aGu4=
 github.com/santhosh-tekuri/jsonschema/v5 v5.3.1/go.mod h1:uToXkOrWAZ6/Oc07xWQrPOhJotwFIyu2bBVN41fcDUY=
+github.com/santhosh-tekuri/jsonschema/v6 v6.0.2/go.mod h1:JXeL+ps8p7/KNMjDQk3TCwPpBy0wYklyWTfbkIzdIFU=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
