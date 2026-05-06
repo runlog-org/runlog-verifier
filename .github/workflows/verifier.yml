@@ -22,6 +22,20 @@ jobs:
           go-version: "1.26"
           cache: true
 
+      # `go mod tidy` must be a no-op in CI: any drift means a contributor
+      # forgot to commit go.mod/go.sum or a stale dependency lingered.
+      # Mirrors the gate in runlog-schema's `generators-smoke` job; without
+      # this, Renovate major-bump PRs that add an unused require can merge
+      # silently (see [B16] / [B18] re: jsonschema v6).
+      - name: Tidy is clean
+        run: |
+          go mod tidy
+          if ! git diff --quiet go.mod go.sum; then
+            echo "::error::go mod tidy produced changes; commit go.mod/go.sum"
+            git --no-pager diff go.mod go.sum
+            exit 1
+          fi
+
       - name: Vet
         run: make vet
 
