@@ -8,11 +8,21 @@
 package fingerprint
 
 import (
+	"context"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
 )
+
+// gitTimeout caps how long either `git rev-parse` or `git status --porcelain`
+// is allowed to run during fingerprint capture. A hung git invocation
+// (filesystem stall, repo lock contention) would otherwise block the entire
+// `verify` run indefinitely; the fingerprint is best-effort, so missing it on
+// a stuck host is preferable to deadlocking the verifier. 30s is loose enough
+// to tolerate slow networked filesystems while still bounding worst-case
+// blocking.
+const gitTimeout = 30 * time.Second
 
 // Print holds the captured environment snapshot. All fields are
 // best-effort — the program does not fail if git is unavailable.
@@ -78,19 +88,26 @@ func Capture() Print {
 		return p
 	}
 
-	// Resolve HEAD commit short SHA. Failure means we're not in a repo.
-	out, err := exec.Command(gitPath, "rev-parse", "--short", "HEAD").Output()
+	// Resolve HEAD commit short SHA. Failure (or timeout) means we're not in
+	// a usable repo; treat both as GitAvailable=false so a hung git doesn't
+	// block the verifier.
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	out, err := exec.CommandContext(ctx, gitPath, "rev-parse", "--short", "HEAD").Output()
+	cancel()
 	if err != nil {
-		// Not a git working directory — GitAvailable stays false.
+		// Not a git working directory (or git hung past gitTimeout) —
+		// GitAvailable stays false.
 		return p
 	}
 	p.GitAvailable = true
 	p.GitCommit = strings.TrimSpace(string(out))
 
 	// Detect uncommitted changes (only reachable when we're in a repo).
-	if out, err := exec.Command(gitPath, "status", "--porcelain").Output(); err == nil {
+	ctx, cancel = context.WithTimeout(context.Background(), gitTimeout)
+	if out, err := exec.CommandContext(ctx, gitPath, "status", "--porcelain").Output(); err == nil {
 		p.GitDirty = strings.TrimSpace(string(out)) != ""
 	}
+	cancel()
 
 	return p
 }
