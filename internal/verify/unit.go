@@ -247,14 +247,14 @@ func runUnitSubprocess(e *Entry) Result {
 	}
 	timeout := e.Verification.TimeoutSeconds
 
-	failedRes, failedDriver, _, failedReason := runUnitSubprocessBranch(
+	failedRes, failedDriver, failedReason, _ := runUnitSubprocessBranch(
 		"failed_approach", tool, prep.FailedSetup, prep.FailedAction, prep.FailedInputs, timeout)
 	if failedReason != nil {
 		return rejectedReasons(res, []Reason{*failedReason})
 	}
 	defer cleanupUnitSubprocessSandbox(failedDriver)
 
-	workingRes, workingDriver, _, workingReason := runUnitSubprocessBranch(
+	workingRes, workingDriver, workingReason, _ := runUnitSubprocessBranch(
 		"working_approach", tool, prep.WorkingSetup, prep.WorkingAction, prep.WorkingInputs, timeout)
 	if workingReason != nil {
 		return rejectedReasons(res, []Reason{*workingReason})
@@ -303,16 +303,16 @@ func runUnitSubprocess(e *Entry) Result {
 // SubprocessDriver pointed at it, and runs the branch's setup+action.
 // Mirrors runReexecuteBranch but without the cassette setup_script step.
 // Returns the action's ExecResult, the driver instance (so the caller can
-// defer the sandbox cleanup), the underlying runner sentinel error when
-// relevant, and a non-nil Reason when the run failed.
-func runUnitSubprocessBranch(branchName, tool string, setup, action []runner.Step, inputs map[string]any, timeout float64) (runner.ExecResult, runner.SubprocessDriver, error, *Reason) {
+// defer the sandbox cleanup), a non-nil Reason when the run failed, and
+// the underlying runner sentinel error when relevant.
+func runUnitSubprocessBranch(branchName, tool string, setup, action []runner.Step, inputs map[string]any, timeout float64) (runner.ExecResult, runner.SubprocessDriver, *Reason, error) {
 	workdir, err := os.MkdirTemp("", "runlog-unit-")
 	if err != nil {
 		r := Reason{
 			Code:    "sandbox_alloc_failed",
 			Message: fmt.Sprintf("%s: %v", branchName, err),
 		}
-		return runner.ExecResult{}, runner.SubprocessDriver{}, nil, &r
+		return runner.ExecResult{}, runner.SubprocessDriver{}, &r, nil
 	}
 	driver := runner.SubprocessDriver{Tool: tool, Workdir: workdir}
 
@@ -321,7 +321,7 @@ func runUnitSubprocessBranch(branchName, tool string, setup, action []runner.Ste
 		_ = os.RemoveAll(workdir)
 		code := unitSubprocessRunErrorCode(err, "branch_runner_error")
 		r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, err)}
-		return runner.ExecResult{}, driver, err, &r
+		return runner.ExecResult{}, driver, &r, err
 	}
 	return res, driver, nil, nil
 }
@@ -398,7 +398,7 @@ func runOneUnitSubprocessMutation(b mutationBaseline, m Mutation, idx int, tool 
 		// deterministically at the end of *this* mutation rather than
 		// accumulating across iterations. Mirrors runOneReexecuteMutation.
 		return func() []Reason {
-			got, mutDriver, runErr, runReason := runUnitSubprocessBranch(
+			got, mutDriver, runReason, runErr := runUnitSubprocessBranch(
 				fmt.Sprintf("mutation #%d (%s) on %s", idx+1, m.Strategy, branch),
 				tool, baseline.Setup, mutAction, mutInputs, b.Timeout)
 			defer cleanupUnitSubprocessSandbox(mutDriver)

@@ -285,7 +285,7 @@ func TestRunReexecuteBranchRejectsDbSqliteSymlink(t *testing.T) {
 	// A no-op action — we never get past the symlink check.
 	action := []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}}
 
-	res, driver, runErr, reason := runReexecuteBranch(
+	res, driver, reason, runErr := runReexecuteBranch(
 		"failed_approach", cas, nil, action, nil, 5,
 	)
 
@@ -296,13 +296,13 @@ func TestRunReexecuteBranchRejectsDbSqliteSymlink(t *testing.T) {
 		t.Fatalf("reason.Code=%q, want sandbox_symlink_rejected (msg=%q)", reason.Code, reason.Message)
 	}
 	if runErr != nil {
-		// Per the doc comment on runReexecuteBranch (lines 195-196), the
-		// verifier-internal early return should set the third return to nil.
+		// Per the doc comment on runReexecuteBranch, the verifier-internal
+		// early return should set the trailing error to nil.
 		t.Errorf("runErr=%v, want nil for verifier-internal early return", runErr)
 	}
 	// The guard's cleanupReexecuteSandbox call must have removed the workdir.
 	// driver returned to caller is the zero value here per the source's
-	// `return runner.ExecResult{}, runner.SubprocessDriver{}, nil, &r`. So we
+	// `return runner.ExecResult{}, runner.SubprocessDriver{}, &r, nil`. So we
 	// can't assert a specific path is gone, but the guard's path uses the
 	// local `driver` variable (not the zero value); covered by the integration
 	// path below.
@@ -331,7 +331,7 @@ func TestRunReexecuteBranchAllocFailedReturnsTypedReason(t *testing.T) {
 	}
 	action := []runner.Step{{Type: "code", Lang: "shell", Body: "true"}}
 
-	res, driver, runErr, reason := runReexecuteBranch(
+	res, driver, reason, runErr := runReexecuteBranch(
 		"failed_approach", cas, nil, action, nil, 5,
 	)
 
