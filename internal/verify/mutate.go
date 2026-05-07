@@ -48,6 +48,17 @@ func (k branchKind) specKeys() (retKey, raiseKey string) {
 	return "working_branch_must_return", "working_branch_must_raise"
 }
 
+// planNodeKeys returns the schema-side differential keys for this branch's
+// plan-node containment specs. The single-string variant requires a substring
+// match; the `_any` list variant requires any-of substring match. Both keys
+// are independent and may both be present (additive semantics).
+func (k branchKind) planNodeKeys() (key, anyKey string) {
+	if k == branchFailed {
+		return "failed_branch_must_contain_plan_node", "failed_branch_must_contain_plan_node_any"
+	}
+	return "working_branch_must_contain_plan_node", "working_branch_must_contain_plan_node_any"
+}
+
 // branchBaseline captures one branch's un-mutated execution context so a
 // mutation can be applied as a delta against it.
 //
