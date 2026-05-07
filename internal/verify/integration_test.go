@@ -390,6 +390,42 @@ literals:
 	}
 }
 
+// TestMutationCassetteResponseBodyExpectedFailNewFieldKey is the v0.4.1
+// counterpart to TestMutationCassetteResponseBodyExpectedFail above, except
+// the cassette-response selector is declared under the new `field:` YAML key
+// instead of the legacy `action:`. Both shapes must pass — the verifier reads
+// Mutation.Field first and falls back to Mutation.ActionLegacy. F76.
+func TestMutationCassetteResponseBodyExpectedFailNewFieldKey(t *testing.T) {
+	skipIfNoPython3(t)
+	mutations := `
+    - strategy: mutate_cassette_response
+      target: widget-ok
+      field: body
+      new_value: "TAMPERED"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $LITERAL_NOOP
+      new_value: 1
+      branch: working_approach
+      expected_result: unchanged
+`
+	yml := buildCassetteResponseYAML(mutations) + `
+literals:
+  $LITERAL_NOOP:
+    value: 1
+    reason: sentinel literal not referenced by either branch
+    category: public_constant
+`
+	res, err := Run([]byte(yml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
 func TestMutationCassetteResponseStatusExpectedFail(t *testing.T) {
 	skipIfNoPython3(t)
 	// Perturbing the working-branch status from 200 to 500 must break the

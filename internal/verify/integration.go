@@ -557,16 +557,19 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 //
 //	strategy: mutate_cassette_response
 //	target:   <step_id>          # references a key in cassette.steps
-//	field:    body | status | header.<NAME>   # carried in m.Field (yaml:"action",
-//	                                            see mutationField below)
+//	field:    body | status | header.<NAME>   # schema 0.4.1+ key, mapped to
+//	                                            Mutation.Field; legacy seeds
+//	                                            may carry it under `action:`
+//	                                            (Mutation.ActionLegacy) instead.
 //	new_value: <replacement>     # string for body/header.*; int|string for status
 //	branch:   failed_approach | working_approach   # required (cassette
 //	                                                   responses are per-branch
 //	                                                   in the v0.1 wire shape)
 //
-// The Mutation struct carries the field selector in Mutation.Field (yaml tag
-// "action") — reusing the slot rather than expanding the wire shape keeps the
-// schema delta to one line. mutationField below is the canonical extractor.
+// Schema 0.4.1 (F76) added a dedicated `field:` YAML key, deprecating the
+// previous `action:` overload that dual-purposed as a `custom`-strategy hook.
+// mutationField below is the canonical extractor — it prefers Mutation.Field,
+// falling back to Mutation.ActionLegacy for in-flight seeds.
 //
 // Validation:
 //   - target must name a declared cassette step, AND that step must appear in
@@ -614,7 +617,8 @@ func applyCassetteResponseMutation(c *cassette.Cassette, m Mutation, branchSeq [
 	if field == "" {
 		return nil, &Reason{Code: "mutation_field_invalid",
 			Message: "mutate_cassette_response requires field: body | status | header.<NAME> " +
-				"(carried in the mutation's `action` YAML key / Mutation.Field)"}
+				"(carried in the mutation's `field:` YAML key — schema 0.4.1+ — " +
+				"or the legacy `action:` key for in-flight seeds)"}
 	}
 
 	clone := c.Clone()
@@ -663,12 +667,18 @@ func applyCassetteResponseMutation(c *cassette.Cassette, m Mutation, branchSeq [
 	return clone, nil
 }
 
-// mutationField extracts the cassette-response mutation's field selector. The
-// wire shape carries it in the `action` YAML key (Go field: Mutation.Field) so
-// the schema delta is just a one-line strategy enum addition. Whitespace is
-// trimmed; an empty result means the submitter didn't declare a field.
+// mutationField extracts the cassette-response mutation's field selector.
+// Schema 0.4.1 (F76) split the wire shape into a dedicated `field:` YAML key,
+// deprecating `action:` for this strategy. Both shapes remain valid; this
+// extractor prefers Mutation.Field (`field:` in YAML) and falls back to
+// Mutation.ActionLegacy (`action:`) for in-flight seeds authored before the
+// split. Whitespace is trimmed; an empty result means the submitter didn't
+// declare a field under either key.
 func mutationField(m Mutation) string {
-	return strings.TrimSpace(m.Field)
+	if v := strings.TrimSpace(m.Field); v != "" {
+		return v
+	}
+	return strings.TrimSpace(m.ActionLegacy)
 }
 
 // stringNewValue coerces m.NewValue into a string for body / header
