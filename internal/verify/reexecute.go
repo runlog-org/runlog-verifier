@@ -378,11 +378,7 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
 		mutInputs, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
-			return []Reason{{
-				Code: "mutation_target_invalid",
-				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-					idx+1, m.Strategy, branch, err),
-			}}
+			return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 		}
 
 		// ── Per-mutation fresh sandbox ────────────────────────────────
@@ -402,10 +398,7 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 				// in-band step crashes have already been folded into the
 				// ExecResult.Raised path by the driver and won't reach here.
 				if runErr != nil && isEnvErr(runErr) {
-					return []Reason{{
-						Code:    "mutation_runner_error",
-						Message: runReason.Message,
-					}}
+					return []Reason{mutationRunnerErrorReasonMsg(runReason.Message)}
 				}
 				// setup_script_failed under a mutation: synthesize a raised
 				// ExecResult so the outcome classifier produces outcomeFail.

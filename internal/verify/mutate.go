@@ -256,6 +256,50 @@ func strategyUnsupportedReason(idx int, strategyName string) []Reason {
 	}}
 }
 
+// mutationTargetInvalidReason builds the per-mutation "mutation_target_invalid"
+// rejection raised when a strategy's apply() rejects the mutation's target/
+// new_value/token shape. The same six-line `Code + Sprintf` block was
+// duplicated in runOneMutation (mutate.go), runOneIntegrationMutation
+// (integration.go), runOneUnitSubprocessMutation (unit.go), and
+// runOneReexecuteMutation (reexecute.go); centralising it here keeps the
+// per-mutation prefix ("mutation #N (strategy) on branch:") consistent
+// across tiers.
+func mutationTargetInvalidReason(idx int, m Mutation, branch branchKind, err error) Reason {
+	return Reason{
+		Code: "mutation_target_invalid",
+		Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
+			idx+1, m.Strategy, branch, err),
+	}
+}
+
+// mutationRunnerErrorReason builds the per-mutation "mutation_runner_error"
+// rejection raised when isEnvErr(err) is true (timeout / missing
+// interpreter / missing host tool). The error is wrapped with the canonical
+// "mutation #N (strategy) on branch: <err>" prefix matching the other
+// per-mutation diagnostics. Used by runOneMutation (mutate.go) and
+// runOneIntegrationMutation (integration.go), which still hold the
+// underlying err. The unit-subprocess and reexecute tiers pass through a
+// pre-formatted Reason.Message via mutationRunnerErrorReasonMsg below.
+func mutationRunnerErrorReason(idx int, m Mutation, branch branchKind, err error) Reason {
+	return Reason{
+		Code: "mutation_runner_error",
+		Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
+			idx+1, m.Strategy, branch, err),
+	}
+}
+
+// mutationRunnerErrorReasonMsg is the pre-formatted-message form of
+// mutationRunnerErrorReason. The unit-subprocess and reexecute mutation
+// runners surface a Reason whose Message already carries the
+// "mutation #N (strategy) on branch: <err>" prefix (composed by the
+// per-branch helper that allocates the sandbox); this helper just wraps
+// that pre-formatted string in the canonical Reason{Code: ...} shape so
+// the env-error early-return uses the same builder as the underlying-error
+// form.
+func mutationRunnerErrorReasonMsg(msg string) Reason {
+	return Reason{Code: "mutation_runner_error", Message: msg}
+}
+
 // runMutations applies each declared mutation and verifies the actual outcome
 // matches the declared expectation. Returns (reasons, supported).
 //
@@ -428,11 +472,7 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
 		mutInputs, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
-			return []Reason{{
-				Code: "mutation_target_invalid",
-				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-					idx+1, m.Strategy, branch, err),
-			}}
+			return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 		}
 
 		// Use the per-branch driver when set (F18+F23 path); fall back to
@@ -446,11 +486,7 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 		got, err := drv.Run(baseline.Setup, mutAction, mutInputs, b.Timeout)
 		if err != nil {
 			if isEnvErr(err) {
-				return []Reason{{
-					Code: "mutation_runner_error",
-					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-						idx+1, m.Strategy, branch, err),
-				}}
+				return []Reason{mutationRunnerErrorReason(idx, m, branch, err)}
 			}
 			// Generic subprocess crash (SyntaxError after a remove mutation,
 			// runtime segfault, OOM kill). Treat as the test failing —

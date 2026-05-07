@@ -387,11 +387,7 @@ func runOneUnitSubprocessMutation(b mutationBaseline, m Mutation, idx int, tool 
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
 		mutInputs, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
-			return []Reason{{
-				Code: "mutation_target_invalid",
-				Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-					idx+1, m.Strategy, branch, err),
-			}}
+			return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 		}
 
 		// Per-mutation fresh sandbox. Wrapped in a closure so cleanup runs
@@ -405,10 +401,7 @@ func runOneUnitSubprocessMutation(b mutationBaseline, m Mutation, idx int, tool 
 
 			if runReason != nil {
 				if runErr != nil && isEnvErr(runErr) {
-					return []Reason{{
-						Code:    "mutation_runner_error",
-						Message: runReason.Message,
-					}}
+					return []Reason{mutationRunnerErrorReasonMsg(runReason.Message)}
 				}
 				got = synthesizeMutationCrashMessage(runReason.Message)
 			}

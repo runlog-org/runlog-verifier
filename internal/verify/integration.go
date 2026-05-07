@@ -501,11 +501,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 			var err error
 			mutInputs, mutAction, err = strat.apply(baseline, m)
 			if err != nil {
-				return []Reason{{
-					Code: "mutation_target_invalid",
-					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-						idx+1, m.Strategy, branch, err),
-				}}
+				return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 			}
 		}
 
@@ -519,11 +515,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 			// Same crash-as-fail logic as runOneMutation: timeout/missing
 			// interpreter are environmental; everything else is a real fail.
 			if isEnvErr(err) {
-				return []Reason{{
-					Code: "mutation_runner_error",
-					Message: fmt.Sprintf("mutation #%d (%s) on %s: %v",
-						idx+1, m.Strategy, branch, err),
-				}}
+				return []Reason{mutationRunnerErrorReason(idx, m, branch, err)}
 			}
 			got = synthesizeMutationCrash(err)
 		}
