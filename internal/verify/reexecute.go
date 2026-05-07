@@ -13,16 +13,19 @@ package verify
 // cassette's declared setup_script to provision it, and dispatches the
 // branch's typed setup+action steps through SubprocessDriver.
 //
-// v0.1 of this slice supports the two simplest runtime tools:
+// v0.1 of this slice supports the simplest runtime tools:
 //
-//   tool: shell  → step.Lang must be "shell"; bodies run via `sh -c`.
-//   tool: sqlite → step.Lang ∈ {"shell", "sql"}; sql bodies run via
-//                  `sqlite3 $DB_PATH` with body on stdin.
+//   tool: shell    → step.Lang must be "shell"; bodies run via `sh -c`.
+//   tool: sqlite   → step.Lang ∈ {"shell", "sql"}; sql bodies run via
+//                    `sqlite3 $DB_PATH` with body on stdin.
+//   tool: postgres → step.Lang ∈ {"shell", "sql"}; an ephemeral DB is
+//                    provisioned per-branch via runner.ProvisionPostgresDB
+//                    and exposed as $DATABASE_URL.
 //
-// Other declared tools (postgres, redis, git, docker) surface as
+// Other declared tools (redis, git, docker) surface as
 // `runtime_unsupported`. The slice deliberately keeps
 // tool-specific drivers out of scope per CLAUDE.md invariant #10 ("cheap and
-// simple first") — adding a postgres/redis driver is a one-tool follow-up.
+// simple first") — adding a redis/git/docker driver is a one-tool follow-up.
 //
 // Per-branch sandbox lifecycle:
 //
@@ -44,7 +47,7 @@ package verify
 // so a seed author who tries to mix them gets a precise diagnostic.
 //
 // Deliberately out of scope for this slice (follow-ups):
-//   - postgres / redis / git / docker runtime tools
+//   - redis / git / docker runtime tools
 //   - cassette.runtime.version enforcement (advisory in v0.1)
 //   - regex-based stdout matching (failed_branch_must_return: {pattern: ...})
 //   - reexecute-mode replay_sequence semantics (per-branch sandboxes are
@@ -56,8 +59,10 @@ package verify
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/runlog-org/runlog-verifier/internal/verify/cassette"
 	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
@@ -68,8 +73,33 @@ import (
 // `runtime_unsupported` so authors know the feature is recognised
 // but unimplemented (rather than malformed).
 var reexecuteSupportedTools = map[string]bool{
-	"shell":  true,
-	"sqlite": true,
+	"shell":    true,
+	"sqlite":   true,
+	"postgres": true,
+}
+
+// postgresBaseDSN returns the connection string the verifier uses as the
+// admin endpoint for CREATE DATABASE / DROP DATABASE on a postgres
+// reexecute branch. Defaults to a localhost dev server when
+// RUNLOG_VERIFY_PGURL is unset; the verifier deliberately follows the
+// trust-the-host model (same contract as sqlite3) and does not require
+// an explicit env var on a developer laptop.
+func postgresBaseDSN() string {
+	if v := os.Getenv("RUNLOG_VERIFY_PGURL"); v != "" {
+		return v
+	}
+	return "postgres://localhost:5432/postgres"
+}
+
+// postgresDBNameFromDSN extracts the database name from a postgres://
+// URI. Returns "" on parse failure or if the path is empty — the
+// caller's stale-DB sweep prefix-check is the safety net.
+func postgresDBNameFromDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(u.Path, "/")
 }
 
 // reexecuteSupportedIsolations enumerates the verification.isolation values
@@ -209,6 +239,28 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 	}
 	driver := runner.SubprocessDriver{Tool: cas.Runtime.Tool, Workdir: workdir}
 
+	// Postgres branches need an ephemeral DB before setup_script can run —
+	// the script's bodies typically reference $DATABASE_URL. Provisioning
+	// is per-branch (and per-mutation, since runOneReexecuteMutation calls
+	// into this same function), so each run gets a clean DB.
+	if cas.Runtime.Tool == "postgres" {
+		baseDSN := postgresBaseDSN()
+		_, branchDSN, perr := runner.ProvisionPostgresDB(baseDSN)
+		if perr != nil {
+			cleanupReexecuteSandbox(driver, cas, inputs, timeout)
+			code := reexecuteRunErrorCode(perr, "runtime_provision_failed")
+			r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, perr)}
+			return runner.ExecResult{}, runner.SubprocessDriver{}, &r, perr
+		}
+		// The inputs map flows through into RunSetupScript and driver.Run; the
+		// teardown path reads $DATABASE_URL back out of inputs to derive the
+		// dbName for DropPostgresDB.
+		if inputs == nil {
+			inputs = map[string]any{}
+		}
+		inputs["$DATABASE_URL"] = branchDSN
+	}
+
 	if err := driver.RunSetupScript(cas.SetupScript, inputs, timeout); err != nil {
 		cleanupReexecuteSandbox(driver, cas, inputs, timeout)
 		code := reexecuteRunErrorCode(err, "setup_script_failed")
@@ -253,6 +305,17 @@ func cleanupReexecuteSandbox(driver runner.SubprocessDriver, cas *cassette.Casse
 	}
 	_ = driver.RunTeardownScript(cas.TeardownScript, inputs, timeout)
 	_ = os.RemoveAll(driver.Workdir)
+
+	// Postgres ephemeral-DB cleanup. Best-effort: a failure here only
+	// matters for observability, since the dbName carries the stable
+	// `runlog_verify_` prefix and a manual sweep can find any leaks.
+	if cas.Runtime != nil && cas.Runtime.Tool == "postgres" {
+		if dsn, ok := inputs["$DATABASE_URL"].(string); ok && dsn != "" {
+			if dbName := postgresDBNameFromDSN(dsn); strings.HasPrefix(dbName, "runlog_verify_") {
+				_ = runner.DropPostgresDB(postgresBaseDSN(), dbName)
+			}
+		}
+	}
 }
 
 // reexecuteRunErrorCode maps a SubprocessDriver error to the Reason.Code
@@ -274,6 +337,8 @@ func reexecuteRunErrorCode(err error, defaultCode string) string {
 		return "branch_timeout"
 	case errors.Is(err, runner.ErrLanguageUnsupported), errors.Is(err, runner.ErrSubprocessTool):
 		return "language_not_yet_implemented"
+	case errors.Is(err, runner.ErrPostgresProvision):
+		return "runtime_provision_failed"
 	}
 	return defaultCode
 }
