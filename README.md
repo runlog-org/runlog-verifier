@@ -25,6 +25,15 @@ Pin a version or change the install dir via env vars:
     curl -sSL https://raw.githubusercontent.com/runlog-org/runlog-verifier/main/install.sh \
       | VERSION=v0.2.0 INSTALL_DIR=$HOME/bin sh
 
+On Debian/Ubuntu, prebuilt `.deb` packages are attached to every release
+(amd64, arm64). No `apt` repo to add; download and `dpkg -i`:
+
+    VER=0.3.0  # latest release; check https://github.com/runlog-org/runlog-verifier/releases
+    ARCH=amd64
+    curl -fsSL -o /tmp/runlog-verifier.deb \
+      "https://github.com/runlog-org/runlog-verifier/releases/download/v${VER}/runlog-verifier_${VER}_${ARCH}.deb"
+    sudo dpkg -i /tmp/runlog-verifier.deb
+
 The script is plain POSIX `sh` (`install.sh` at the repo root). It supports
 `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`. For other
 platforms, build from source per the [Build](#build) section below.

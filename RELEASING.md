@@ -40,6 +40,8 @@ artefacts attached.
    - `runlog-verifier-linux-arm64`
    - `runlog-verifier-darwin-amd64`
    - `runlog-verifier-darwin-arm64`
+   - `runlog-verifier_X.Y.Z_amd64.deb`
+   - `runlog-verifier_X.Y.Z_arm64.deb`
    - `SHA256SUMS`
 
 ## Verify a release locally
@@ -59,6 +61,28 @@ To rebuild from source and compare:
 Identical hashes prove the published binary was built from this source
 with the published toolchain — the trust assumption documented in
 `docs/03-verification-and-provenance.md` §5.4.
+
+## Install via `.deb` (Linux)
+
+The release attaches `.deb` packages for `linux-amd64` and `linux-arm64`. v0
+ships them via GitHub Releases with no signing — users verify against
+`SHA256SUMS` (trust-on-first-use), the same model as the Homebrew tap.
+
+    VER=0.3.0  # replace with the desired release
+    ARCH=amd64
+    curl -fsSL -o /tmp/runlog-verifier.deb \
+      "https://github.com/runlog-org/runlog-verifier/releases/download/v${VER}/runlog-verifier_${VER}_${ARCH}.deb"
+    sudo dpkg -i /tmp/runlog-verifier.deb
+
+To verify the download against the published trust anchor:
+
+    curl -fsSL -o /tmp/SHA256SUMS \
+      "https://github.com/runlog-org/runlog-verifier/releases/download/v${VER}/SHA256SUMS"
+    (cd /tmp && sha256sum -c --ignore-missing SHA256SUMS)
+
+A self-hosted, signed apt repo (Caddy + reprepro) is on the roadmap if
+adoption warrants — see the [`runlog-verifier`](https://github.com/runlog-org/runlog-verifier)
+roadmap.
 
 ## Homebrew tap auto-bump
 
