@@ -63,12 +63,21 @@ type RuntimeSpec struct {
 // Mutation mirrors the per-mutation entry. Both expected_result and
 // expected_branch_outcome are read as raw maps so the type-discriminated
 // schema rule can be evaluated without forcing a single shape.
+//
+// Field carries the cassette-response selector (body / status / header.<NAME>)
+// for `mutate_cassette_response`. Schema 0.4.1 (F76) added a dedicated
+// `field:` YAML key for this, deprecating the legacy `action:` key that
+// dual-purposed as a `custom`-strategy hook. New seeds SHOULD use `field:`;
+// existing seeds carrying the selector under `action:` remain valid. The
+// verifier reads both: `field:` is preferred, `action:` is the back-compat
+// fallback. mutationField (in integration.go) is the canonical extractor.
 type Mutation struct {
 	Strategy              string            `yaml:"strategy"`
 	Target                string            `yaml:"target"`
 	NewValue              any               `yaml:"new_value"`
 	Token                 string            `yaml:"token"`
-	Field                 string            `yaml:"action,omitempty"`
+	Field                 string            `yaml:"field,omitempty"`
+	ActionLegacy          string            `yaml:"action,omitempty"`
 	Branch                string            `yaml:"branch"`
 	ExpectedResult        string            `yaml:"expected_result"`
 	ExpectedBranchOutcome map[string]string `yaml:"expected_branch_outcome"`
