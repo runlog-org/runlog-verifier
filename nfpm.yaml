@@ -1,0 +1,17 @@
+name: runlog-verifier
+arch: ${ARCH}
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: Volker Otto <hello@volkerotto.net>
+description: |
+  Local-first verifier for Runlog cassettes.
+  Verifies signed Runlog bundles against their source by re-running both
+  branches of each test entry locally with reproducible build artifacts.
+homepage: https://runlog.org
+license: Apache-2.0
+contents:
+  - src: ./dist/release/runlog-verifier-linux-${ARCH}
+    dst: /usr/bin/runlog-verifier
+    file_info:
+      mode: 0755
