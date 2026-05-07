@@ -129,7 +129,7 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	timeout := e.Verification.TimeoutSeconds
 
 	// ── Failed branch run ─────────────────────────────────────────────
-	failedRes, failedDriver, _, failedReason := runReexecuteBranch(
+	failedRes, failedDriver, failedReason, _ := runReexecuteBranch(
 		"failed_approach", cas, prep.FailedSetup, prep.FailedAction, prep.FailedInputs, timeout)
 	if failedReason != nil {
 		return rejectedReasons(res, []Reason{*failedReason})
@@ -137,7 +137,7 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	defer cleanupReexecuteSandbox(failedDriver, cas, prep.FailedInputs, timeout)
 
 	// ── Working branch run ────────────────────────────────────────────
-	workingRes, workingDriver, _, workingReason := runReexecuteBranch(
+	workingRes, workingDriver, workingReason, _ := runReexecuteBranch(
 		"working_approach", cas, prep.WorkingSetup, prep.WorkingAction, prep.WorkingInputs, timeout)
 	if workingReason != nil {
 		return rejectedReasons(res, []Reason{*workingReason})
@@ -198,14 +198,14 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 // mid-run still triggers teardown. On every error return,
 // cleanupReexecuteSandbox is called immediately so the teardown sequence
 // stays in one place rather than being duplicated at each error site.
-func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action []runner.Step, inputs map[string]any, timeout float64) (runner.ExecResult, runner.SubprocessDriver, error, *Reason) {
+func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action []runner.Step, inputs map[string]any, timeout float64) (runner.ExecResult, runner.SubprocessDriver, *Reason, error) {
 	workdir, err := os.MkdirTemp("", "runlog-reexec-")
 	if err != nil {
 		r := Reason{
 			Code:    "sandbox_alloc_failed",
 			Message: fmt.Sprintf("%s: %v", branchName, err),
 		}
-		return runner.ExecResult{}, runner.SubprocessDriver{}, nil, &r
+		return runner.ExecResult{}, runner.SubprocessDriver{}, &r, nil
 	}
 	driver := runner.SubprocessDriver{Tool: cas.Runtime.Tool, Workdir: workdir}
 
@@ -213,7 +213,7 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 		cleanupReexecuteSandbox(driver, cas, inputs, timeout)
 		code := reexecuteRunErrorCode(err, "setup_script_failed")
 		r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, err)}
-		return runner.ExecResult{}, runner.SubprocessDriver{}, err, &r
+		return runner.ExecResult{}, runner.SubprocessDriver{}, &r, err
 	}
 
 	// db.sqlite Lstat guard: if the cassette's setup_script created a
@@ -229,7 +229,7 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 					Message: fmt.Sprintf("%s: db.sqlite is a symlink; refusing to follow it",
 						branchName),
 				}
-				return runner.ExecResult{}, runner.SubprocessDriver{}, nil, &r
+				return runner.ExecResult{}, runner.SubprocessDriver{}, &r, nil
 			}
 		}
 	}
@@ -239,7 +239,7 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 		cleanupReexecuteSandbox(driver, cas, inputs, timeout)
 		code := reexecuteRunErrorCode(err, "branch_runner_error")
 		r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, err)}
-		return runner.ExecResult{}, driver, err, &r
+		return runner.ExecResult{}, driver, &r, err
 	}
 	return res, driver, nil, nil
 }
@@ -327,7 +327,7 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 		// accumulate across iterations and keep N tmpdirs + teardown_script
 		// processes live until the whole mutation loop returned.
 		return func() []Reason {
-			got, mutDriver, runErr, runReason := runReexecuteBranch(
+			got, mutDriver, runReason, runErr := runReexecuteBranch(
 				fmt.Sprintf("mutation #%d (%s) on %s", idx+1, m.Strategy, branch),
 				cas, baseline.Setup, mutAction, mutInputs, b.Timeout)
 			defer cleanupReexecuteSandbox(mutDriver, cas, mutInputs, b.Timeout)
