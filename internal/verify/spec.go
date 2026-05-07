@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
@@ -20,10 +21,13 @@ import (
 func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Reason {
 	branch := k.String()
 	retKey, raiseKey := k.specKeys()
+	planKey, planAnyKey := k.planNodeKeys()
 	retSpec, hasRet := diff[retKey]
 	raiseSpec, hasRaise := diff[raiseKey]
+	planSpec, hasPlan := diff[planKey]
+	planAnySpec, hasPlanAny := diff[planAnyKey]
 
-	if !hasRet && !hasRaise {
+	if !hasRet && !hasRaise && !hasPlan && !hasPlanAny {
 		// No expectation declared for this branch — accept silently.
 		// failed_branch_must_fail_with is a separate spec key, deferred.
 		return nil
@@ -76,14 +80,27 @@ func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Re
 		return nil
 	}
 
-	if !hasRet {
+	// Successful return — accumulate constraints from each declared spec.
+	var reasons []Reason
+
+	if hasRaise && !hasRet && !hasPlan && !hasPlanAny {
+		// Branch was supposed to raise but returned, and no other constraints
+		// to layer onto the success path.
 		return []Reason{{
 			Code: "unexpected_return",
 			Message: fmt.Sprintf("%s returned %s value, spec required a raised exception",
 				branch, got.TypeName),
 		}}
 	}
-	return matchReturnSpec(branch, got, retSpec)
+
+	if hasRet {
+		reasons = append(reasons, matchReturnSpec(branch, got, retSpec)...)
+	}
+	if hasPlan || hasPlanAny {
+		reasons = append(reasons, matchPlanNodeContains(branch, got, planSpec, hasPlan, planAnySpec, hasPlanAny)...)
+	}
+
+	return reasons
 }
 
 // matchReturnSpec compares ExecResult against a {type, value_equals} spec.
@@ -186,6 +203,107 @@ func matchReturnSpec(branch string, got runner.ExecResult, spec any) []Reason {
 	}
 
 	return out
+}
+
+// matchPlanNodeContains evaluates the *_must_contain_plan_node and
+// *_must_contain_plan_node_any differential keys. Both run as substring
+// containment against got.Repr — for SubprocessDriver branches that's the
+// raw stdout (e.g. psql EXPLAIN output), for PythonDriver it's repr($RESULT).
+//
+// Designed for canonical postgres seeds whose action runs `EXPLAIN (FORMAT…)`
+// and asserts that the captured plan tree mentions specific node types
+// (Seq Scan, Bitmap Index Scan, …); the substring shape sidesteps brittle
+// byte-equality on plan output that varies by server version + statistics.
+//
+// hasKey / hasAnyKey are passed explicitly so the helper distinguishes
+// "key absent" (no constraint) from "key present with nil value" (malformed).
+func matchPlanNodeContains(branch string, got runner.ExecResult, scalarSpec any, hasScalar bool, anySpec any, hasAny bool) []Reason {
+	var out []Reason
+
+	if hasScalar {
+		needle, ok := scalarSpec.(string)
+		if !ok {
+			out = append(out, Reason{
+				Code:    "malformed_plan_node_spec",
+				Message: fmt.Sprintf("%s_branch_must_contain_plan_node: expected string, got %T", branch, scalarSpec),
+			})
+		} else if needle == "" {
+			out = append(out, Reason{
+				Code:    "malformed_plan_node_spec",
+				Message: fmt.Sprintf("%s_branch_must_contain_plan_node: empty string is not a valid substring", branch),
+			})
+		} else if !strings.Contains(got.Repr, needle) {
+			out = append(out, Reason{
+				Code: "differential_plan_node_mismatch",
+				Message: fmt.Sprintf("%s output did not contain %q (got: %s)",
+					branch, needle, truncateForReason(got.Repr)),
+			})
+		}
+	}
+
+	if hasAny {
+		list, ok := anySpec.([]any)
+		if !ok {
+			out = append(out, Reason{
+				Code:    "malformed_plan_node_spec",
+				Message: fmt.Sprintf("%s_branch_must_contain_plan_node_any: expected list of strings, got %T", branch, anySpec),
+			})
+			return out
+		}
+		if len(list) == 0 {
+			out = append(out, Reason{
+				Code:    "malformed_plan_node_spec",
+				Message: fmt.Sprintf("%s_branch_must_contain_plan_node_any: empty list is not a valid any-of constraint", branch),
+			})
+			return out
+		}
+		needles := make([]string, 0, len(list))
+		for i, item := range list {
+			s, sOK := item.(string)
+			if !sOK {
+				out = append(out, Reason{
+					Code:    "malformed_plan_node_spec",
+					Message: fmt.Sprintf("%s_branch_must_contain_plan_node_any[%d]: expected string, got %T", branch, i, item),
+				})
+				return out
+			}
+			if s == "" {
+				out = append(out, Reason{
+					Code:    "malformed_plan_node_spec",
+					Message: fmt.Sprintf("%s_branch_must_contain_plan_node_any[%d]: empty string is not a valid substring", branch, i),
+				})
+				return out
+			}
+			needles = append(needles, s)
+		}
+		matched := false
+		for _, n := range needles {
+			if strings.Contains(got.Repr, n) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			out = append(out, Reason{
+				Code: "differential_plan_node_mismatch",
+				Message: fmt.Sprintf("%s output did not contain any of %v (got: %s)",
+					branch, needles, truncateForReason(got.Repr)),
+			})
+		}
+	}
+
+	return out
+}
+
+// truncateForReason caps long output strings so Reason.Message stays readable
+// in CLI/JSON dumps. EXPLAIN output runs to several KB; the first ~200 chars
+// is enough to diagnose most mismatches without flooding the report.
+func truncateForReason(s string) string {
+	const max = 200
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…(truncated)"
 }
 
 // lengthFromSpec extracts an integer length from a YAML-decoded value. yaml.v3
