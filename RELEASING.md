@@ -60,6 +60,33 @@ Identical hashes prove the published binary was built from this source
 with the published toolchain — the trust assumption documented in
 `docs/03-verification-and-provenance.md` §5.4.
 
+## Homebrew tap auto-bump
+
+The `update-tap` job in [`release.yml`](.github/workflows/release.yml) runs after
+`build` on every stable tag (drafts are skipped) and pushes a refreshed
+`Formula/runlog-verifier.rb` to [`runlog-org/homebrew-runlog`](https://github.com/runlog-org/homebrew-runlog).
+
+End users install with:
+
+    brew install runlog-org/runlog/runlog-verifier
+
+### One-time secret setup
+
+The job needs a fine-grained Personal Access Token (or GitHub App
+installation token) with **`Contents: Read and write`** on
+`runlog-org/homebrew-runlog`, stored as the repo secret
+**`HOMEBREW_TAP_TOKEN`** in `runlog-org/runlog-verifier`.
+
+If the secret is missing the job logs a warning and exits cleanly — the
+release itself still succeeds. To recover after fixing the secret,
+re-run the failed workflow run from the Actions tab.
+
+### Manual recovery
+
+If a tap bump fails for any reason, the formula can be edited by hand
+in `runlog-org/homebrew-runlog`. The next stable tag will overwrite it
+from the template, so manual fixes are stop-gaps.
+
 ## Smoke the workflow without a tag
 
 The release workflow accepts `workflow_dispatch` for manual smoke runs.
