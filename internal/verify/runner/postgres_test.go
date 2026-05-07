@@ -138,3 +138,57 @@ func TestSubprocessDriver_Postgres_MissingDatabaseURL(t *testing.T) {
 		t.Fatalf("err=%v, want substring '$DATABASE_URL'", err)
 	}
 }
+
+func TestProvisionAndDropPostgresDB(t *testing.T) {
+	baseDSN := skipIfNoPGURL(t)
+
+	dbName, branchDSN, err := ProvisionPostgresDB(baseDSN)
+	if err != nil {
+		t.Fatalf("ProvisionPostgresDB: %v", err)
+	}
+	// Always drop, even on subsequent test failure.
+	t.Cleanup(func() { _ = DropPostgresDB(baseDSN, dbName) })
+
+	if !strings.HasPrefix(dbName, "runlog_verify_") {
+		t.Fatalf("dbName=%q, want runlog_verify_ prefix", dbName)
+	}
+	if !strings.Contains(branchDSN, dbName) {
+		t.Fatalf("branchDSN=%q does not contain dbName=%q", branchDSN, dbName)
+	}
+
+	// Smoke: connect to the new DB, run SELECT 1.
+	d := SubprocessDriver{Tool: "postgres", Workdir: newSandbox(t)}
+	res, err := d.Run(
+		nil,
+		[]Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		map[string]any{"$DATABASE_URL": branchDSN},
+		10,
+	)
+	if err != nil {
+		t.Fatalf("Run on newly-provisioned DB: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("unexpected raised: %s: %s", res.Exception, res.Message)
+	}
+	if !strings.Contains(res.Repr, "1") {
+		t.Fatalf("repr=%q, want it to contain %q", res.Repr, "1")
+	}
+
+	// Drop, then confirm the DB is gone by trying to connect again — the
+	// attempt should fail.
+	if err := DropPostgresDB(baseDSN, dbName); err != nil {
+		t.Fatalf("DropPostgresDB: %v", err)
+	}
+	res2, err := d.Run(
+		nil,
+		[]Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		map[string]any{"$DATABASE_URL": branchDSN},
+		10,
+	)
+	// Either err is non-nil (psql can't connect) OR res.Raised is true.
+	// Different psql/postgres versions surface this slightly differently;
+	// accept either signal.
+	if err == nil && !res2.Raised {
+		t.Fatalf("expected post-drop connect to fail; got err=nil, raised=false, repr=%q", res2.Repr)
+	}
+}
