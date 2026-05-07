@@ -38,6 +38,34 @@ The script is plain POSIX `sh` (`install.sh` at the repo root). It supports
 `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`. For other
 platforms, build from source per the [Build](#build) section below.
 
+## Runtime requirements
+
+The verifier shells out to host-installed tools to drive each cassette
+runtime. There's no embedded interpreter, no Docker, no implicit setup.
+
+| Cassette runtime          | Required binaries on PATH | Required env                                                                                              |
+|---------------------------|---------------------------|-----------------------------------------------------------------------------------------------------------|
+| `tool: shell`             | `sh`                      | —                                                                                                         |
+| `tool: sqlite`            | `sqlite3`                 | —                                                                                                         |
+| `tool: postgres`          | `psql`                    | `RUNLOG_VERIFY_PGURL` (default `postgres://localhost:5432/postgres`); the role must have `CREATEDB` privilege. |
+
+The postgres driver provisions a fresh ephemeral `runlog_verify_<rand>`
+database per branch (and per mutation re-run) via `CREATE DATABASE`,
+and drops it on teardown. Stale databases from a crashed verifier can
+be swept with `psql -c "SELECT datname FROM pg_database WHERE datname
+LIKE 'runlog_verify_%'"`.
+
+Quick local Postgres for testing:
+
+    # Docker (one-shot, deletes itself on stop)
+    docker run --rm -p 5432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16
+
+    # Then point the verifier at it:
+    export RUNLOG_VERIFY_PGURL=postgres://postgres@localhost:5432/postgres
+
+Verifier function-tier (`isolation: function`) entries continue to use
+the embedded Python driver and need only `python3` on PATH.
+
 ## Layout
 
 - `cmd/runlog-verifier/` — entry point

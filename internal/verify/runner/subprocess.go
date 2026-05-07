@@ -304,6 +304,11 @@ func (d SubprocessDriver) validateSteps(steps []Step) error {
 				return fmt.Errorf("%w: tool=sqlite supports lang ∈ {shell, sql}, got %q",
 					ErrSubprocessTool, s.Lang)
 			}
+		case "postgres":
+			if lang != "shell" && lang != "sql" {
+				return fmt.Errorf("%w: tool=postgres supports lang ∈ {shell, sql}, got %q",
+					ErrSubprocessTool, s.Lang)
+			}
 		default:
 			return fmt.Errorf("%w: SubprocessDriver tool %q is not implemented",
 				ErrSubprocessTool, d.Tool)
@@ -353,7 +358,14 @@ func (d SubprocessDriver) execStep(s Step, inputs map[string]any, timeoutSec flo
 		// TABLE t; --` would otherwise close out the literal and tail
 		// arbitrary SQL onto the statement.
 		body := substituteVars(s.Body, inputs, sqlQuote)
-		return d.execSQL(body, inputs, timeoutSec)
+		switch d.Tool {
+		case "sqlite":
+			return d.execSQL(body, inputs, timeoutSec)
+		case "postgres":
+			return d.execPostgres(body, inputs, timeoutSec)
+		}
+		return "", "", 0, fmt.Errorf("%w: lang=sql requires tool ∈ {sqlite, postgres}, got %q",
+			ErrSubprocessTool, d.Tool)
 	}
 	// Unreachable — validateSteps already rejected unknown langs.
 	return "", "", 0, fmt.Errorf("%w: lang %q", ErrLanguageUnsupported, lang)
@@ -374,6 +386,21 @@ func (d SubprocessDriver) execSQL(body string, inputs map[string]any, timeoutSec
 			ErrSubprocessTool)
 	}
 	return d.execCommand("sqlite3", []string{dbPath}, body, inputs, timeoutSec)
+}
+
+// execPostgres runs `psql --dbname=$DATABASE_URL --no-psqlrc -X -q -v ON_ERROR_STOP=1`
+// with body on stdin. The $DATABASE_URL value is supplied by the reexecute
+// orchestrator (per-branch ephemeral DB created by ProvisionPostgresDB);
+// SubprocessDriver itself stays stateless.
+func (d SubprocessDriver) execPostgres(body string, inputs map[string]any, timeoutSec float64) (string, string, int, error) {
+	dsn, _ := inputs["$DATABASE_URL"].(string)
+	if dsn == "" {
+		return "", "", 0, fmt.Errorf("%w: lang=sql under tool=postgres requires $DATABASE_URL (set by the reexecute orchestrator's per-branch provisioner)",
+			ErrSubprocessTool)
+	}
+	return d.execCommand("psql",
+		[]string{"--dbname=" + dsn, "--no-psqlrc", "-X", "-q", "-v", "ON_ERROR_STOP=1"},
+		body, inputs, timeoutSec)
 }
 
 // execCommand runs an external program with the given args, stdin, env, and

@@ -1,9 +1,11 @@
 // Package runner executes the user code declared in a runlog entry's
 // failed_approach / working_approach branches. The MVP supports the
 // schema's `isolation: function` value via a Python-in-subprocess
-// driver (see python.go); other isolation values declared by the
-// schema (subprocess, compiler, database, http_client, docker_daemon)
-// are recognised by the registry but not yet implemented — callers
+// driver (see python.go) and `isolation: subprocess` / `isolation:
+// database` (with cassette.runtime.tool ∈ {shell, sqlite, postgres})
+// via SubprocessDriver (see subprocess.go); other isolation values
+// declared by the schema (compiler, http_client, docker_daemon) are
+// recognised by the registry but not yet implemented — callers
 // surface a typed `isolation_unsupported` reason naming the requested
 // value so the unit-tier check can degrade to tier_unsupported.
 //

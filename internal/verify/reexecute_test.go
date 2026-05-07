@@ -54,11 +54,11 @@ func TestPOCReexecuteShapeEndToEnd(t *testing.T) {
 
 // TestReexecuteRuntimeToolNotImplemented covers the tier_unsupported diagnostic
 // path for runtime tools the verifier recognises but doesn't drive yet
-// (postgres, redis, git, docker). Authors of canonical seeds for those tools
+// (redis, git, docker). Authors of canonical seeds for those tools
 // should see a precise reason naming the tool, not a generic rejection.
 func TestReexecuteRuntimeToolNotImplemented(t *testing.T) {
 	yaml := `
-unit_id: reexecute-postgres-stub
+unit_id: reexecute-redis-stub
 domain: [test]
 failed_approach:
   description: stub
@@ -75,8 +75,8 @@ verification:
   isolation: database
   cassette:
     mode: reexecute
-    artifact: pg-stub.cassette.yaml
-    runtime: { tool: postgres }
+    artifact: redis-stub.cassette.yaml
+    runtime: { tool: redis }
     captures: [stub]
     strips: [stub]
     replay_targets: [stub]
@@ -98,8 +98,47 @@ verification:
 	if len(res.Reasons) != 1 || res.Reasons[0].Code != "runtime_unsupported" {
 		t.Fatalf("reasons=%v, want runtime_unsupported", res.Reasons)
 	}
-	if !strings.Contains(res.Reasons[0].Message, "postgres") {
-		t.Fatalf("message=%q, expected to name postgres", res.Reasons[0].Message)
+	if !strings.Contains(res.Reasons[0].Message, "redis") {
+		t.Fatalf("message=%q, expected to name redis", res.Reasons[0].Message)
+	}
+}
+
+// TestReexecuteRuntimePostgresProvisionFailure covers the new
+// runtime_provision_failed reason: tool=postgres is recognised, but a
+// deliberately unreachable RUNLOG_VERIFY_PGURL forces ProvisionPostgresDB
+// to fail. The reason code must be "runtime_provision_failed", not
+// "runtime_unsupported" (which would mean the runner declined to run at
+// all) and not "branch_runner_error" (the catch-all for unmapped errors).
+//
+// Skips when psql is not on PATH — the helper shells out to it.
+func TestReexecuteRuntimePostgresProvisionFailure(t *testing.T) {
+	if _, err := exec.LookPath("psql"); err != nil {
+		t.Skip("psql not on PATH")
+	}
+	// Port 1 is the TCPMUX well-known port; reliably refuses the
+	// postgres handshake with a fast connect-failure on every host.
+	t.Setenv("RUNLOG_VERIFY_PGURL", "postgres://localhost:1/postgres")
+
+	cas := &cassette.Cassette{
+		Mode:           "reexecute",
+		Runtime:        &cassette.Runtime{Tool: "postgres"},
+		SetupScript:    nil,
+		TeardownScript: nil,
+	}
+	setup := []runner.Step(nil)
+	action := []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}}
+
+	_, _, reason, runErr := runReexecuteBranch(
+		"failed_approach", cas, setup, action, nil, 5)
+
+	if reason == nil {
+		t.Fatalf("expected non-nil Reason; got nil (runErr=%v)", runErr)
+	}
+	if reason.Code != "runtime_provision_failed" {
+		t.Fatalf("reason.Code=%q, want runtime_provision_failed; reason=%+v", reason.Code, reason)
+	}
+	if !strings.Contains(reason.Message, "failed_approach") {
+		t.Fatalf("reason.Message=%q, want to contain branch name 'failed_approach'", reason.Message)
 	}
 }
 
