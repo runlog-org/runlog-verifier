@@ -309,6 +309,11 @@ func (d SubprocessDriver) validateSteps(steps []Step) error {
 				return fmt.Errorf("%w: tool=postgres supports lang ∈ {shell, sql}, got %q",
 					ErrSubprocessTool, s.Lang)
 			}
+		case "redis":
+			if lang != "shell" {
+				return fmt.Errorf("%w: tool=redis requires lang=shell, got %q",
+					ErrSubprocessTool, s.Lang)
+			}
 		default:
 			return fmt.Errorf("%w: SubprocessDriver tool %q is not implemented",
 				ErrSubprocessTool, d.Tool)
