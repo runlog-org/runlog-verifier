@@ -59,6 +59,17 @@ func (k branchKind) planNodeKeys() (key, anyKey string) {
 	return "working_branch_must_contain_plan_node", "working_branch_must_contain_plan_node_any"
 }
 
+// planNodeTimingKeys returns the schema-side differential keys for this
+// branch's plan-node planning-time thresholds. Both keys are independent
+// and may both be present (additive semantics — gt and lt can both apply
+// to the same branch, e.g. "10 < planning_time < 20").
+func (k branchKind) planNodeTimingKeys() (gtKey, ltKey string) {
+	if k == branchFailed {
+		return "failed_branch_planning_time_seconds_gt", "failed_branch_planning_time_seconds_lt"
+	}
+	return "working_branch_planning_time_seconds_gt", "working_branch_planning_time_seconds_lt"
+}
+
 // branchBaseline captures one branch's un-mutated execution context so a
 // mutation can be applied as a delta against it.
 //

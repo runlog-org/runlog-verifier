@@ -26,8 +26,11 @@ func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Re
 	raiseSpec, hasRaise := diff[raiseKey]
 	planSpec, hasPlan := diff[planKey]
 	planAnySpec, hasPlanAny := diff[planAnyKey]
+	gtKey, ltKey := k.planNodeTimingKeys()
+	gtSpec, hasGt := diff[gtKey]
+	ltSpec, hasLt := diff[ltKey]
 
-	if !hasRet && !hasRaise && !hasPlan && !hasPlanAny {
+	if !hasRet && !hasRaise && !hasPlan && !hasPlanAny && !hasGt && !hasLt {
 		// No expectation declared for this branch — accept silently.
 		// failed_branch_must_fail_with is a separate spec key, deferred.
 		return nil
@@ -83,7 +86,7 @@ func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Re
 	// Successful return — accumulate constraints from each declared spec.
 	var reasons []Reason
 
-	if hasRaise && !hasRet && !hasPlan && !hasPlanAny {
+	if hasRaise && !hasRet && !hasPlan && !hasPlanAny && !hasGt && !hasLt {
 		// Branch was supposed to raise but returned, and no other constraints
 		// to layer onto the success path.
 		return []Reason{{
@@ -99,6 +102,7 @@ func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Re
 	if hasPlan || hasPlanAny {
 		reasons = append(reasons, matchPlanNodeContains(branch, got, planSpec, hasPlan, planAnySpec, hasPlanAny)...)
 	}
+	reasons = append(reasons, matchPlanNodeTiming(branch, got, gtSpec, hasGt, ltSpec, hasLt)...)
 
 	return reasons
 }
@@ -293,6 +297,140 @@ func matchPlanNodeContains(branch string, got runner.ExecResult, scalarSpec any,
 	}
 
 	return out
+}
+
+// matchPlanNodeTiming evaluates the *_branch_planning_time_seconds_gt and
+// *_branch_planning_time_seconds_lt differential keys. Both keys are
+// independent and may both apply to the same branch (additive — e.g. "gt 1
+// AND lt 10" expresses a range constraint).
+//
+// Source: parses got.Repr as `EXPLAIN (FORMAT JSON)` output (top-level array
+// → first object → "Planning Time" field, milliseconds), divides by 1000.0
+// for seconds. Parse is lazy — only runs when at least one timing key is
+// present. Lives entirely inside the helper so the runner stays driver-
+// agnostic, mirroring matchPlanNodeContains' design.
+//
+// Reasons:
+//   - differential_planning_time_mismatch — value is well-formed but fails
+//     the gt/lt comparison.
+//   - malformed_planning_time_spec — bad spec value (non-number, negative),
+//     or got.Repr can't be parsed as EXPLAIN (FORMAT JSON), or the parsed
+//     output doesn't carry a numeric "Planning Time" field.
+func matchPlanNodeTiming(branch string, got runner.ExecResult, gtSpec any, hasGt bool, ltSpec any, hasLt bool) []Reason {
+	if !hasGt && !hasLt {
+		return nil
+	}
+	var out []Reason
+
+	// Validate spec shapes before parsing got.Repr — surfaces malformed
+	// specs even on no-output branches.
+	var gtThreshold, ltThreshold float64
+	if hasGt {
+		v, ok := planningTimeSpecAsFloat(gtSpec)
+		if !ok {
+			out = append(out, Reason{
+				Code:    "malformed_planning_time_spec",
+				Message: fmt.Sprintf("%s_branch_planning_time_seconds_gt: expected number, got %T", branch, gtSpec),
+			})
+			hasGt = false
+		} else if v < 0 {
+			out = append(out, Reason{
+				Code:    "malformed_planning_time_spec",
+				Message: fmt.Sprintf("%s_branch_planning_time_seconds_gt: negative threshold %v is not valid", branch, v),
+			})
+			hasGt = false
+		} else {
+			gtThreshold = v
+		}
+	}
+	if hasLt {
+		v, ok := planningTimeSpecAsFloat(ltSpec)
+		if !ok {
+			out = append(out, Reason{
+				Code:    "malformed_planning_time_spec",
+				Message: fmt.Sprintf("%s_branch_planning_time_seconds_lt: expected number, got %T", branch, ltSpec),
+			})
+			hasLt = false
+		} else if v < 0 {
+			out = append(out, Reason{
+				Code:    "malformed_planning_time_spec",
+				Message: fmt.Sprintf("%s_branch_planning_time_seconds_lt: negative threshold %v is not valid", branch, v),
+			})
+			hasLt = false
+		} else {
+			ltThreshold = v
+		}
+	}
+	if !hasGt && !hasLt {
+		return out
+	}
+
+	seconds, err := parsePlanningTimeSeconds(got.Repr)
+	if err != nil {
+		out = append(out, Reason{
+			Code:    "malformed_planning_time_spec",
+			Message: fmt.Sprintf("%s output is not a parseable EXPLAIN (FORMAT JSON) document with a numeric \"Planning Time\" field: %v", branch, err),
+		})
+		return out
+	}
+
+	if hasGt && !(seconds > gtThreshold) {
+		out = append(out, Reason{
+			Code:    "differential_planning_time_mismatch",
+			Message: fmt.Sprintf("%s planning time %.3fs is not > %.3fs", branch, seconds, gtThreshold),
+		})
+	}
+	if hasLt && !(seconds < ltThreshold) {
+		out = append(out, Reason{
+			Code:    "differential_planning_time_mismatch",
+			Message: fmt.Sprintf("%s planning time %.3fs is not < %.3fs", branch, seconds, ltThreshold),
+		})
+	}
+	return out
+}
+
+// planningTimeSpecAsFloat coerces a YAML-decoded numeric value to float64.
+// Matches lengthFromSpec's defensive int/int64/float64 acceptance — yaml.v3
+// decodes integer literals as int but JSON-decoded specs come through as
+// float64, so accept both. Rejects non-numeric types.
+func planningTimeSpecAsFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case float64:
+		return n, true
+	}
+	return 0, false
+}
+
+// parsePlanningTimeSeconds extracts the "Planning Time" field (milliseconds)
+// from an `EXPLAIN (FORMAT JSON)` document and returns it in seconds. The
+// document shape is `[{"Plan": ..., "Planning Time": <ms>, ...}]` — a
+// single-element top-level array containing one object. Returns an error
+// when repr is not valid JSON, not the expected array-of-object shape, or
+// when "Planning Time" is missing or non-numeric.
+func parsePlanningTimeSeconds(repr string) (float64, error) {
+	if repr == "" {
+		return 0, errors.New("output is empty")
+	}
+	var top []map[string]any
+	if err := json.Unmarshal([]byte(repr), &top); err != nil {
+		return 0, fmt.Errorf("not valid JSON: %w", err)
+	}
+	if len(top) == 0 {
+		return 0, errors.New("top-level array is empty")
+	}
+	raw, ok := top[0]["Planning Time"]
+	if !ok {
+		return 0, errors.New("\"Planning Time\" field is absent")
+	}
+	ms, ok := raw.(float64)
+	if !ok {
+		return 0, fmt.Errorf("\"Planning Time\" is %T, expected number", raw)
+	}
+	return ms / 1000.0, nil
 }
 
 // truncateForReason caps long output strings so Reason.Message stays readable
