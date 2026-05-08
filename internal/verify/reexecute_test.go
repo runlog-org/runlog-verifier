@@ -54,11 +54,11 @@ func TestPOCReexecuteShapeEndToEnd(t *testing.T) {
 
 // TestReexecuteRuntimeToolNotImplemented covers the tier_unsupported diagnostic
 // path for runtime tools the verifier recognises but doesn't drive yet
-// (redis, git, docker). Authors of canonical seeds for those tools
+// (git, docker). Authors of canonical seeds for those tools
 // should see a precise reason naming the tool, not a generic rejection.
 func TestReexecuteRuntimeToolNotImplemented(t *testing.T) {
 	yaml := `
-unit_id: reexecute-redis-stub
+unit_id: reexecute-git-stub
 domain: [test]
 failed_approach:
   description: stub
@@ -75,8 +75,8 @@ verification:
   isolation: database
   cassette:
     mode: reexecute
-    artifact: redis-stub.cassette.yaml
-    runtime: { tool: redis }
+    artifact: git-stub.cassette.yaml
+    runtime: { tool: git }
     captures: [stub]
     strips: [stub]
     replay_targets: [stub]
@@ -98,8 +98,8 @@ verification:
 	if len(res.Reasons) != 1 || res.Reasons[0].Code != "runtime_unsupported" {
 		t.Fatalf("reasons=%v, want runtime_unsupported", res.Reasons)
 	}
-	if !strings.Contains(res.Reasons[0].Message, "redis") {
-		t.Fatalf("message=%q, expected to name redis", res.Reasons[0].Message)
+	if !strings.Contains(res.Reasons[0].Message, "git") {
+		t.Fatalf("message=%q, expected to name git", res.Reasons[0].Message)
 	}
 }
 

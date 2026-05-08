@@ -21,11 +21,15 @@ package verify
 //   tool: postgres → step.Lang ∈ {"shell", "sql"}; an ephemeral DB is
 //                    provisioned per-branch via runner.ProvisionPostgresDB
 //                    and exposed as $DATABASE_URL.
+//   tool: redis    → step.Lang must be "shell"; an ephemeral DB number is
+//                    provisioned per-branch via runner.ProvisionRedisDB and
+//                    exposed as $REDIS_URL. Redis interaction is through
+//                    redis-cli inside shell step bodies.
 //
-// Other declared tools (redis, git, docker) surface as
-// `runtime_unsupported`. The slice deliberately keeps
-// tool-specific drivers out of scope per CLAUDE.md invariant #10 ("cheap and
-// simple first") — adding a redis/git/docker driver is a one-tool follow-up.
+// Other declared tools (git, docker) surface as `runtime_unsupported`. The
+// slice deliberately keeps tool-specific drivers out of scope per CLAUDE.md
+// invariant #10 ("cheap and simple first") — adding a git/docker driver is a
+// one-tool follow-up.
 //
 // Per-branch sandbox lifecycle:
 //
@@ -47,7 +51,7 @@ package verify
 // so a seed author who tries to mix them gets a precise diagnostic.
 //
 // Deliberately out of scope for this slice (follow-ups):
-//   - redis / git / docker runtime tools
+//   - git / docker runtime tools
 //   - cassette.runtime.version enforcement (advisory in v0.1)
 //   - regex-based stdout matching (failed_branch_must_return: {pattern: ...})
 //   - reexecute-mode replay_sequence semantics (per-branch sandboxes are
@@ -62,6 +66,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/runlog-org/runlog-verifier/internal/verify/cassette"
@@ -76,6 +81,7 @@ var reexecuteSupportedTools = map[string]bool{
 	"shell":    true,
 	"sqlite":   true,
 	"postgres": true,
+	"redis":    true,
 }
 
 // postgresBaseDSN returns the connection string the verifier uses as the
@@ -100,6 +106,36 @@ func postgresDBNameFromDSN(dsn string) string {
 		return ""
 	}
 	return strings.TrimPrefix(u.Path, "/")
+}
+
+// redisBaseURL returns the connection URL the verifier uses as the
+// admin endpoint for FLUSHDB on a redis reexecute branch. Defaults to
+// a localhost dev server when RUNLOG_VERIFY_REDISURL is unset; the
+// verifier follows the same trust-the-host model as sqlite and postgres.
+func redisBaseURL() string {
+	if v := os.Getenv("RUNLOG_VERIFY_REDISURL"); v != "" {
+		return v
+	}
+	return "redis://localhost:6379"
+}
+
+// redisDBNumFromURL extracts the database number from a redis:// URL's
+// path component. Returns (num, true) on success, (0, false) on parse
+// failure or if the path component is not a valid integer.
+func redisDBNumFromURL(rawURL string) (int, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return 0, false
+	}
+	path := strings.TrimPrefix(u.Path, "/")
+	if path == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(path)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // reexecuteSupportedIsolations enumerates the verification.isolation values
@@ -137,8 +173,8 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	if !reexecuteSupportedTools[cas.Runtime.Tool] {
 		return tierUnsupported(res, "runtime_unsupported", fmt.Sprintf(
 			"cassette.runtime.tool %q is not implemented in this verifier "+
-				"build — shell + sqlite ship first; postgres / redis / git / "+
-				"docker land in follow-up commits",
+				"build — shell + sqlite + postgres + redis ship first; "+
+				"git / docker land in follow-up commits",
 			cas.Runtime.Tool,
 		))
 	}
@@ -241,11 +277,11 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 	}
 	driver := runner.SubprocessDriver{Tool: cas.Runtime.Tool, Workdir: workdir}
 
-	// Postgres branches need an ephemeral DB before setup_script can run —
-	// the script's bodies typically reference $DATABASE_URL. Provisioning
-	// is per-branch (and per-mutation, since runOneReexecuteMutation calls
-	// into this same function), so each run gets a clean DB.
-	if cas.Runtime.Tool == "postgres" {
+	// Database-tool branches need an ephemeral DB before setup_script can run.
+	// Provisioning is per-branch (and per-mutation, since runOneReexecuteMutation
+	// calls into this same function), so each run gets a clean database.
+	switch cas.Runtime.Tool {
+	case "postgres":
 		baseDSN := postgresBaseDSN()
 		_, branchDSN, perr := runner.ProvisionPostgresDB(baseDSN)
 		if perr != nil {
@@ -261,6 +297,21 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 			inputs = map[string]any{}
 		}
 		inputs["$DATABASE_URL"] = branchDSN
+	case "redis":
+		baseURL := redisBaseURL()
+		_, branchURL, perr := runner.ProvisionRedisDB(baseURL)
+		if perr != nil {
+			cleanupReexecuteSandbox(driver, cas, inputs, timeout)
+			code := reexecuteRunErrorCode(perr, "runtime_provision_failed")
+			r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, perr)}
+			return runner.ExecResult{}, runner.SubprocessDriver{}, &r, perr
+		}
+		// The teardown path reads $REDIS_URL back out of inputs to derive the
+		// DB number for DropRedisDB.
+		if inputs == nil {
+			inputs = map[string]any{}
+		}
+		inputs["$REDIS_URL"] = branchURL
 	}
 
 	if err := driver.RunSetupScript(cas.SetupScript, inputs, timeout); err != nil {
@@ -308,13 +359,22 @@ func cleanupReexecuteSandbox(driver runner.SubprocessDriver, cas *cassette.Casse
 	_ = driver.RunTeardownScript(cas.TeardownScript, inputs, timeout)
 	_ = os.RemoveAll(driver.Workdir)
 
-	// Postgres ephemeral-DB cleanup. Best-effort: a failure here only
-	// matters for observability, since the dbName carries the stable
-	// `runlog_verify_` prefix and a manual sweep can find any leaks.
-	if cas.Runtime != nil && cas.Runtime.Tool == "postgres" {
+	// Ephemeral-DB cleanup per tool. Best-effort: failures only matter for
+	// observability — a manual sweep can find any leaks.
+	if cas.Runtime == nil {
+		return
+	}
+	switch cas.Runtime.Tool {
+	case "postgres":
 		if dsn, ok := inputs["$DATABASE_URL"].(string); ok && dsn != "" {
 			if dbName := postgresDBNameFromDSN(dsn); strings.HasPrefix(dbName, "runlog_verify_") {
 				_ = runner.DropPostgresDB(postgresBaseDSN(), dbName)
+			}
+		}
+	case "redis":
+		if redisURL, ok := inputs["$REDIS_URL"].(string); ok && redisURL != "" {
+			if dbNum, ok := redisDBNumFromURL(redisURL); ok {
+				_ = runner.DropRedisDB(redisBaseURL(), dbNum)
 			}
 		}
 	}
@@ -340,6 +400,8 @@ func reexecuteRunErrorCode(err error, defaultCode string) string {
 	case errors.Is(err, runner.ErrLanguageUnsupported), errors.Is(err, runner.ErrSubprocessTool):
 		return "language_not_yet_implemented"
 	case errors.Is(err, runner.ErrPostgresProvision):
+		return "runtime_provision_failed"
+	case errors.Is(err, runner.ErrRedisProvision):
 		return "runtime_provision_failed"
 	}
 	return defaultCode
