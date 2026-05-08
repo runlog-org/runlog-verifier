@@ -29,8 +29,10 @@ func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Re
 	gtKey, ltKey := k.planNodeTimingKeys()
 	gtSpec, hasGt := diff[gtKey]
 	ltSpec, hasLt := diff[ltKey]
+	collKey := k.collectionPropertyKey()
+	collSpec, hasColl := diff[collKey]
 
-	if !hasRet && !hasRaise && !hasPlan && !hasPlanAny && !hasGt && !hasLt {
+	if !hasRet && !hasRaise && !hasPlan && !hasPlanAny && !hasGt && !hasLt && !hasColl {
 		// No expectation declared for this branch — accept silently.
 		// failed_branch_must_fail_with is a separate spec key, deferred.
 		return nil
@@ -86,7 +88,7 @@ func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Re
 	// Successful return — accumulate constraints from each declared spec.
 	var reasons []Reason
 
-	if hasRaise && !hasRet && !hasPlan && !hasPlanAny && !hasGt && !hasLt {
+	if hasRaise && !hasRet && !hasPlan && !hasPlanAny && !hasGt && !hasLt && !hasColl {
 		// Branch was supposed to raise but returned, and no other constraints
 		// to layer onto the success path.
 		return []Reason{{
@@ -103,6 +105,7 @@ func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Re
 		reasons = append(reasons, matchPlanNodeContains(branch, got, planSpec, hasPlan, planAnySpec, hasPlanAny)...)
 	}
 	reasons = append(reasons, matchPlanNodeTiming(branch, got, gtSpec, hasGt, ltSpec, hasLt)...)
+	reasons = append(reasons, matchCollectionProperty(branch, got, collSpec, hasColl)...)
 
 	return reasons
 }
@@ -296,6 +299,77 @@ func matchPlanNodeContains(branch string, got runner.ExecResult, scalarSpec any,
 		}
 	}
 
+	return out
+}
+
+// matchCollectionProperty evaluates the *_collection_has_duplicates
+// differential keys. The captured stdout (got.Repr) is parsed as a
+// newline-separated collection — each line is trimmed of whitespace, empty
+// lines are dropped, and duplicates are detected by comparing list length
+// to set size. The spec value (bool) declares which state the branch must
+// be in.
+//
+// Designed for canonical seeds whose action prints a list of items and the
+// claim is "this approach yields duplicates" vs "the working approach
+// doesn't" (e.g. redis-scan-cursor-... where the failed approach can return
+// the same key twice under concurrent mutation, the working approach
+// dedups).
+//
+// hasKey is passed explicitly so the helper distinguishes "key absent"
+// (no constraint) from "key present with nil value" (malformed).
+func matchCollectionProperty(branch string, got runner.ExecResult, spec any, hasKey bool) []Reason {
+	if !hasKey {
+		return nil
+	}
+	want, ok := spec.(bool)
+	if !ok {
+		return []Reason{{
+			Code:    "malformed_collection_property_spec",
+			Message: fmt.Sprintf("%s_branch_collection_has_duplicates: expected bool, got %T", branch, spec),
+		}}
+	}
+
+	items := parseCollectionLines(got.Repr)
+	seen := make(map[string]struct{}, len(items))
+	duplicates := false
+	for _, item := range items {
+		if _, ok := seen[item]; ok {
+			duplicates = true
+			break
+		}
+		seen[item] = struct{}{}
+	}
+
+	if duplicates == want {
+		return nil
+	}
+	return []Reason{{
+		Code: "differential_collection_property_mismatch",
+		Message: fmt.Sprintf(
+			"%s collection has_duplicates=%t (got %d lines), spec required has_duplicates=%t (output: %s)",
+			branch, duplicates, len(items), want, truncateForReason(got.Repr),
+		),
+	}}
+}
+
+// parseCollectionLines splits captured stdout into a normalized line list:
+// split on '\n', trim each line of whitespace, drop empty-after-trim lines.
+// Used by matchCollectionProperty as the canonical "stdout as a collection"
+// reading. Sufficient for redis-cli, ls, and any line-oriented tool whose
+// output is one element per line.
+func parseCollectionLines(repr string) []string {
+	if repr == "" {
+		return nil
+	}
+	raw := strings.Split(repr, "\n")
+	out := make([]string, 0, len(raw))
+	for _, line := range raw {
+		s := strings.TrimSpace(line)
+		if s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
 	return out
 }
 

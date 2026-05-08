@@ -70,6 +70,17 @@ func (k branchKind) planNodeTimingKeys() (gtKey, ltKey string) {
 	return "working_branch_planning_time_seconds_gt", "working_branch_planning_time_seconds_lt"
 }
 
+// collectionPropertyKey returns the schema-side differential key for this
+// branch's has_duplicates collection-property check. Single key (no _any
+// variant — unlike plan_node) because the property is a yes/no claim about
+// the captured stdout parsed as a list of lines.
+func (k branchKind) collectionPropertyKey() string {
+	if k == branchFailed {
+		return "failed_branch_collection_has_duplicates"
+	}
+	return "working_branch_collection_has_duplicates"
+}
+
 // branchBaseline captures one branch's un-mutated execution context so a
 // mutation can be applied as a delta against it.
 //
