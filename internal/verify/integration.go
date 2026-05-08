@@ -222,6 +222,12 @@ func runIntegration(e *Entry) Result {
 	if workingHasRun {
 		reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
 	}
+	if failedHasRun {
+		reasons = append(reasons, matchActionPlanNodeTiming("failed_approach", e.FailedApproach.Assertion, failedRes)...)
+	}
+	if workingHasRun {
+		reasons = append(reasons, matchActionPlanNodeTiming("working_approach", e.WorkingApproach.Assertion, workingRes)...)
+	}
 	if len(reasons) > 0 {
 		return rejectedReasons(res, reasons)
 	}

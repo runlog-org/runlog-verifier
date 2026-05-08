@@ -178,6 +178,8 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	var reasons []Reason
 	reasons = append(reasons, matchOutcome(branchFailed, failedRes, e.Verification.Differential)...)
 	reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
+	reasons = append(reasons, matchActionPlanNodeTiming("failed_approach", e.FailedApproach.Assertion, failedRes)...)
+	reasons = append(reasons, matchActionPlanNodeTiming("working_approach", e.WorkingApproach.Assertion, workingRes)...)
 	if len(reasons) > 0 {
 		return rejectedReasons(res, reasons)
 	}
