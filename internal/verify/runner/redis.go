@@ -18,28 +18,18 @@
 package runner
 
 import (
-	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // ErrRedisProvision is returned when a FLUSHDB provisioning or teardown
 // invocation fails. The reexecute orchestrator surfaces this as the
 // typed reason `runtime_provision_failed`.
 var ErrRedisProvision = errors.New("runner: redis provisioning failed")
-
-const (
-	// redisProvisionTimeout caps both FLUSHDB (provision) and FLUSHDB
-	// (drop) invocations. Generous because the connecting target may be
-	// on a remote host.
-	redisProvisionTimeout = 30 * time.Second
-)
 
 // randomDBNum returns a random integer in [0, 15] using crypto/rand.
 // Redis supports exactly 16 databases (0-15) by default.
@@ -116,18 +106,12 @@ func replaceRedisURLDatabase(baseURL string, dbNum int) (string, error) {
 
 // runRedisCLI runs `redis-cli -u <branchURL> <args...>` with a provisioning
 // timeout, capturing stderr. Non-zero exits are wrapped as ErrRedisProvision
-// with the trimmed stderr message included.
+// with the trimmed stderr message included. Wraps execProvisionCLI with
+// the redis sentinel and the args as the diagnostic label.
 func runRedisCLI(branchURL string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), redisProvisionTimeout)
-	defer cancel()
-
 	cmdArgs := append([]string{"-u", branchURL}, args...)
-	cmd := exec.CommandContext(ctx, "redis-cli", cmdArgs...)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w: redis-cli %s: %v: %s",
-			ErrRedisProvision, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
+	return execProvisionCLI("redis-cli", cmdArgs,
+		ErrRedisProvision,
+		"redis-cli "+strings.Join(args, " "),
+	)
 }

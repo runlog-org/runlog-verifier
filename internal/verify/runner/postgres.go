@@ -13,15 +13,12 @@
 package runner
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"strings"
-	"time"
 )
 
 // ErrPostgresProvision is returned when a CREATE DATABASE / DROP DATABASE
@@ -29,15 +26,9 @@ import (
 // typed reason `runtime_provision_failed`.
 var ErrPostgresProvision = errors.New("runner: postgres provisioning failed")
 
-const (
-	// postgresProvisionTimeout caps both CREATE and DROP invocations.
-	// Generous because the connecting role may be on a remote host.
-	postgresProvisionTimeout = 30 * time.Second
-
-	// postgresDBPrefix marks every ephemeral database created by this
-	// verifier so manual sweeps and dashboards can identify them.
-	postgresDBPrefix = "runlog_verify_"
-)
+// postgresDBPrefix marks every ephemeral database created by this
+// verifier so manual sweeps and dashboards can identify them.
+const postgresDBPrefix = "runlog_verify_"
 
 // randomDBSuffix returns 16 hex chars from crypto/rand, suitable as a
 // database-name suffix. 64 bits of entropy is enough that two parallel
@@ -95,24 +86,18 @@ func DropPostgresDB(baseDSN, dbName string) error {
 // runPsqlAdmin executes a single SQL command via psql against baseDSN.
 // CREATE/DROP DATABASE statements cannot run inside transactions, so we
 // pass them via -c rather than stdin (psql -c implicitly autocommits
-// each statement).
+// each statement). Wraps execProvisionCLI with the postgres sentinel
+// and the SQL statement as the diagnostic label.
 func runPsqlAdmin(baseDSN, sql string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresProvisionTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "psql",
-		"--dbname="+baseDSN,
-		"--no-psqlrc", "-X", "-q",
-		"-v", "ON_ERROR_STOP=1",
-		"-c", sql,
+	return execProvisionCLI("psql",
+		[]string{
+			"--dbname=" + baseDSN,
+			"--no-psqlrc", "-X", "-q",
+			"-v", "ON_ERROR_STOP=1",
+			"-c", sql,
+		},
+		ErrPostgresProvision, sql,
 	)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w: %s: %v: %s",
-			ErrPostgresProvision, sql, err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
 }
 
 // replaceDSNDatabase returns baseDSN with its path component (the
