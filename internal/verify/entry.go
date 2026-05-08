@@ -32,11 +32,13 @@ type Branch struct {
 // compare the two branches' assertions against each other and detect the
 // tautological-test case.
 type Assertion struct {
-	Type      string `yaml:"type"`
-	Expect    string `yaml:"expect"`
-	Path      string `yaml:"path"`
-	Value     any    `yaml:"value"`
-	Exception string `yaml:"exception"`
+	Type                  string  `yaml:"type"`
+	Expect                string  `yaml:"expect"`
+	Path                  string  `yaml:"path"`
+	Value                 any     `yaml:"value"`
+	Exception             string  `yaml:"exception"`
+	PlanningTimeSecondsGt float64 `yaml:"planning_time_seconds_gt,omitempty"`
+	PlanningTimeSecondsLt float64 `yaml:"planning_time_seconds_lt,omitempty"`
 }
 
 // Verification mirrors the schema's verification block.

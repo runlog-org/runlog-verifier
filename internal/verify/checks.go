@@ -46,7 +46,9 @@ func checkBranchesDiscriminating(e *Entry) []Reason {
 		fa.Expect == wa.Expect &&
 		fa.Path == wa.Path &&
 		fmt.Sprintf("%v", fa.Value) == fmt.Sprintf("%v", wa.Value) &&
-		fa.Exception == wa.Exception {
+		fa.Exception == wa.Exception &&
+		fa.PlanningTimeSecondsGt == wa.PlanningTimeSecondsGt &&
+		fa.PlanningTimeSecondsLt == wa.PlanningTimeSecondsLt {
 		return []Reason{{
 			Code: "tautological_branches",
 			Message: "failed_approach.assertion and working_approach.assertion " +

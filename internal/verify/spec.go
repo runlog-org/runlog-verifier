@@ -433,6 +433,84 @@ func parsePlanningTimeSeconds(repr string) (float64, error) {
 	return ms / 1000.0, nil
 }
 
+// matchActionPlanNodeTiming evaluates the per-branch
+// assertion.planning_time_seconds_gt and assertion.planning_time_seconds_lt
+// fields against the captured ExecResult. The action-level analogue of
+// matchPlanNodeTiming — F79 added the differential (cross-branch) form;
+// F80 adds the action-level (per-branch) form so the canonical
+// postgres-update-returning-... seed's failed_approach.assertion and
+// working_approach.assertion timing thresholds actually fire.
+//
+// Returns nil when:
+//   - both timing fields are zero (no constraint declared — 0 is the
+//     unset sentinel, mirroring TimeoutSeconds);
+//   - a.Type != "plan_node" (defensive — only plan_node assertions can
+//     carry timing thresholds; for other types, the fields are inert).
+//
+// Source: parses got.Repr as `EXPLAIN (FORMAT JSON)` output via the
+// F79-shipped parsePlanningTimeSeconds helper. malformed JSON or absent
+// "Planning Time" field surface as malformed_action_planning_time_spec
+// (distinct reason code from the differential's malformed_planning_time_spec
+// so callers can discriminate which gate fired).
+//
+// Reasons:
+//   - action_planning_time_mismatch — well-formed but fails gt/lt.
+//   - malformed_action_planning_time_spec — negative threshold, or
+//     got.Repr not parseable as EXPLAIN (FORMAT JSON), or "Planning Time"
+//     absent / non-numeric.
+func matchActionPlanNodeTiming(branch string, a Assertion, got runner.ExecResult) []Reason {
+	if a.Type != "plan_node" {
+		return nil
+	}
+	if a.PlanningTimeSecondsGt == 0 && a.PlanningTimeSecondsLt == 0 {
+		return nil
+	}
+	var out []Reason
+
+	if a.PlanningTimeSecondsGt < 0 {
+		out = append(out, Reason{
+			Code:    "malformed_action_planning_time_spec",
+			Message: fmt.Sprintf("%s assertion.planning_time_seconds_gt: negative threshold %v is not valid", branch, a.PlanningTimeSecondsGt),
+		})
+	}
+	if a.PlanningTimeSecondsLt < 0 {
+		out = append(out, Reason{
+			Code:    "malformed_action_planning_time_spec",
+			Message: fmt.Sprintf("%s assertion.planning_time_seconds_lt: negative threshold %v is not valid", branch, a.PlanningTimeSecondsLt),
+		})
+	}
+	// Re-derive after the negative-check filter — only well-formed
+	// thresholds drive the comparison.
+	gtActive := a.PlanningTimeSecondsGt > 0
+	ltActive := a.PlanningTimeSecondsLt > 0
+	if !gtActive && !ltActive {
+		return out
+	}
+
+	seconds, err := parsePlanningTimeSeconds(got.Repr)
+	if err != nil {
+		out = append(out, Reason{
+			Code:    "malformed_action_planning_time_spec",
+			Message: fmt.Sprintf("%s output is not a parseable EXPLAIN (FORMAT JSON) document with a numeric \"Planning Time\" field: %v", branch, err),
+		})
+		return out
+	}
+
+	if gtActive && !(seconds > a.PlanningTimeSecondsGt) {
+		out = append(out, Reason{
+			Code:    "action_planning_time_mismatch",
+			Message: fmt.Sprintf("%s planning time %.3fs is not > %.3fs", branch, seconds, a.PlanningTimeSecondsGt),
+		})
+	}
+	if ltActive && !(seconds < a.PlanningTimeSecondsLt) {
+		out = append(out, Reason{
+			Code:    "action_planning_time_mismatch",
+			Message: fmt.Sprintf("%s planning time %.3fs is not < %.3fs", branch, seconds, a.PlanningTimeSecondsLt),
+		})
+	}
+	return out
+}
+
 // truncateForReason caps long output strings so Reason.Message stays readable
 // in CLI/JSON dumps. EXPLAIN output runs to several KB; the first ~200 chars
 // is enough to diagnose most mismatches without flooding the report.
