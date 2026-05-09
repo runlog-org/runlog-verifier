@@ -33,8 +33,9 @@ func matchOutcome(k branchKind, got runner.ExecResult, diff map[string]any) []Re
 	collSpec, hasColl := diff[collKey]
 
 	if !hasRet && !hasRaise && !hasPlan && !hasPlanAny && !hasGt && !hasLt && !hasColl {
-		// No expectation declared for this branch — accept silently.
-		// failed_branch_must_fail_with is a separate spec key, deferred.
+		// No expectation declared for this branch — accept silently. The
+		// branch's success/raise alone is the test surface; differential
+		// constraints are opt-in per branch.
 		return nil
 	}
 

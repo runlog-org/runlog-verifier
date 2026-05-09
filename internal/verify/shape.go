@@ -97,6 +97,15 @@ func mergeLiterals(literals map[string]any, inputs map[string]any) map[string]an
 // The schema permits either a per-branch object (with failed_approach /
 // working_approach keys) or a shared object (any other keys, applied to
 // both branches identically).
+//
+// When the per-branch shape is detected (either failed_approach or
+// working_approach key is present), each present sub-key MUST be a mapping
+// — otherwise the type assertion would silently produce nil and the
+// branch's literals + per-branch overrides would be lost without a
+// diagnostic. The CLI path has no upstream JSON Schema gate, so we surface
+// the typed error here as `malformed_inputs` rather than letting a
+// hand-crafted entry (e.g. `failed_approach: "foo"`) reach the runner with
+// dropped inputs.
 func splitInputs(diff map[string]any) (failed, working map[string]any, err error) {
 	raw, ok := diff["inputs"]
 	if !ok {
@@ -106,11 +115,21 @@ func splitInputs(diff map[string]any) (failed, working map[string]any, err error
 	if !ok {
 		return nil, nil, fmt.Errorf("differential.inputs is not a mapping (got %T)", raw)
 	}
-	_, hasF := m["failed_approach"]
-	_, hasW := m["working_approach"]
+	rawF, hasF := m["failed_approach"]
+	rawW, hasW := m["working_approach"]
 	if hasF || hasW {
-		failed, _ = m["failed_approach"].(map[string]any)
-		working, _ = m["working_approach"].(map[string]any)
+		if hasF {
+			failed, ok = rawF.(map[string]any)
+			if !ok {
+				return nil, nil, fmt.Errorf("differential.inputs.failed_approach is not a mapping (got %T)", rawF)
+			}
+		}
+		if hasW {
+			working, ok = rawW.(map[string]any)
+			if !ok {
+				return nil, nil, fmt.Errorf("differential.inputs.working_approach is not a mapping (got %T)", rawW)
+			}
+		}
 		return failed, working, nil
 	}
 	return m, m, nil

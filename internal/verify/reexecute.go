@@ -138,6 +138,35 @@ func redisDBNumFromURL(rawURL string) (int, bool) {
 	return n, true
 }
 
+// provisionEphemeralResource dispatches per-branch ephemeral-resource
+// provisioning by cassette.runtime.tool. Returns (inputsKey, branchURL, err)
+// where inputsKey is the `$<NAME>_URL` placeholder the orchestrator binds
+// into the per-branch inputs map (caller writes inputs[inputsKey] =
+// branchURL on success). Tools without a server-side resource (shell, sqlite)
+// return ("", "", nil) — the no-op case.
+//
+// This consolidates the previously duplicated postgres / redis provisioning
+// blocks in runReexecuteBranch into a single switch so adding a new tool
+// (docker, F71) is one new arm here plus one new provisioner pair in
+// runner/.
+func provisionEphemeralResource(tool string) (inputsKey, branchURL string, err error) {
+	switch tool {
+	case "postgres":
+		_, dsn, perr := runner.ProvisionPostgresDB(postgresBaseDSN())
+		if perr != nil {
+			return "", "", perr
+		}
+		return "$DATABASE_URL", dsn, nil
+	case "redis":
+		_, url, perr := runner.ProvisionRedisDB(redisBaseURL())
+		if perr != nil {
+			return "", "", perr
+		}
+		return "$REDIS_URL", url, nil
+	}
+	return "", "", nil
+}
+
 // reexecuteSupportedIsolations enumerates the verification.isolation values
 // reexecute mode dispatches under. v0.1 covers `subprocess` (shell-flavored)
 // and `database` (sqlite-flavored). Other isolations declared by the schema
@@ -277,41 +306,24 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 	}
 	driver := runner.SubprocessDriver{Tool: cas.Runtime.Tool, Workdir: workdir}
 
-	// Database-tool branches need an ephemeral DB before setup_script can run.
-	// Provisioning is per-branch (and per-mutation, since runOneReexecuteMutation
-	// calls into this same function), so each run gets a clean database.
-	switch cas.Runtime.Tool {
-	case "postgres":
-		baseDSN := postgresBaseDSN()
-		_, branchDSN, perr := runner.ProvisionPostgresDB(baseDSN)
-		if perr != nil {
-			cleanupReexecuteSandbox(driver, cas, inputs, timeout)
-			code := reexecuteRunErrorCode(perr, "runtime_provision_failed")
-			r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, perr)}
-			return runner.ExecResult{}, runner.SubprocessDriver{}, &r, perr
-		}
+	// Database-tool branches need an ephemeral resource before setup_script can
+	// run. Provisioning is per-branch (and per-mutation, since
+	// runOneReexecuteMutation calls into this same function), so each run gets
+	// a clean resource. Adding a third tool (docker, F71) is one new entry in
+	// the switch + one new provisioner pair in runner/.
+	if urlKey, branchURL, perr := provisionEphemeralResource(cas.Runtime.Tool); perr != nil {
+		cleanupReexecuteSandbox(driver, cas, inputs, timeout)
+		code := reexecuteRunErrorCode(perr, "runtime_provision_failed")
+		r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, perr)}
+		return runner.ExecResult{}, runner.SubprocessDriver{}, &r, perr
+	} else if urlKey != "" {
 		// The inputs map flows through into RunSetupScript and driver.Run; the
-		// teardown path reads $DATABASE_URL back out of inputs to derive the
-		// dbName for DropPostgresDB.
+		// teardown path reads the resource URL back out of inputs to derive
+		// the per-tool drop target (postgresDBNameFromDSN / redisDBNumFromURL).
 		if inputs == nil {
 			inputs = map[string]any{}
 		}
-		inputs["$DATABASE_URL"] = branchDSN
-	case "redis":
-		baseURL := redisBaseURL()
-		_, branchURL, perr := runner.ProvisionRedisDB(baseURL)
-		if perr != nil {
-			cleanupReexecuteSandbox(driver, cas, inputs, timeout)
-			code := reexecuteRunErrorCode(perr, "runtime_provision_failed")
-			r := Reason{Code: code, Message: fmt.Sprintf("%s: %v", branchName, perr)}
-			return runner.ExecResult{}, runner.SubprocessDriver{}, &r, perr
-		}
-		// The teardown path reads $REDIS_URL back out of inputs to derive the
-		// DB number for DropRedisDB.
-		if inputs == nil {
-			inputs = map[string]any{}
-		}
-		inputs["$REDIS_URL"] = branchURL
+		inputs[urlKey] = branchURL
 	}
 
 	if err := driver.RunSetupScript(cas.SetupScript, inputs, timeout); err != nil {

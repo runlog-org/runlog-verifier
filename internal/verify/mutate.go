@@ -389,7 +389,7 @@ func forEachMutationBranch(
 			reasons = append(reasons, Reason{
 				Code: "mutation_no_expectation",
 				Message: fmt.Sprintf(
-					"mutation #%d targets %s but declares no expected_result and no expected_branch_outcome.%s",
+					"mutation #%d targets %s but declares no expected_result and no expected_branch_outcome[%s]",
 					idx+1, branch, branch),
 			})
 			continue
