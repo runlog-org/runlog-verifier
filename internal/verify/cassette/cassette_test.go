@@ -377,3 +377,56 @@ func TestStubRemainingSequence(t *testing.T) {
 		t.Fatalf("RemainingSequence=%v, want [b]", rem)
 	}
 }
+
+func TestParseRuntimeShareStateDefaultFalse(t *testing.T) {
+	raw := map[string]any{
+		"mode": "reexecute",
+		"runtime": map[string]any{
+			"tool": "docker",
+		},
+	}
+	cas, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cas.Runtime == nil {
+		t.Fatalf("runtime nil")
+	}
+	if cas.Runtime.ShareStateAcrossMutations {
+		t.Errorf("expected ShareStateAcrossMutations=false by default, got true")
+	}
+}
+
+func TestParseRuntimeShareStateTrue(t *testing.T) {
+	raw := map[string]any{
+		"mode": "reexecute",
+		"runtime": map[string]any{
+			"tool":                        "docker",
+			"share_state_across_mutations": true,
+		},
+	}
+	cas, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !cas.Runtime.ShareStateAcrossMutations {
+		t.Errorf("expected ShareStateAcrossMutations=true")
+	}
+}
+
+func TestParseRuntimeShareStateNonBool(t *testing.T) {
+	raw := map[string]any{
+		"mode": "reexecute",
+		"runtime": map[string]any{
+			"tool":                        "docker",
+			"share_state_across_mutations": "true",
+		},
+	}
+	_, err := Parse(raw)
+	if err == nil {
+		t.Fatalf("expected parse error for non-bool share_state_across_mutations")
+	}
+	if !strings.Contains(err.Error(), "share_state_across_mutations must be a boolean") {
+		t.Errorf("expected typed error, got: %v", err)
+	}
+}
