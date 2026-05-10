@@ -586,6 +586,83 @@ func matchActionPlanNodeTiming(branch string, a Assertion, got runner.ExecResult
 	return out
 }
 
+// matchActionOutputPattern evaluates the per-branch
+// assertion.pattern_absent and assertion.pattern_present fields against the
+// captured ExecResult's stdout (got.Repr). The action-level analogue of
+// matchPlanNodeContains — F86 adds typed regex assertions on captured output
+// so seeds like docker-buildkit-copy-link-cache-... can claim
+// "the failed approach's stdout MUST NOT match /CACHED \[.*COPY/" while the
+// working approach asserts the same pattern MUST be present.
+//
+// Returns nil when:
+//   - a.Type != "output_match" (defensive — only output_match assertions
+//     carry pattern fields; for other types, the fields are inert);
+//   - both pattern fields are empty strings (no constraint declared — empty
+//     string is the unset sentinel, mirroring the F80 timing-fields zero
+//     convention).
+//
+// Source: matches against got.Repr — for SubprocessDriver branches that's
+// the raw stdout (e.g. `docker build` output), for PythonDriver it's
+// repr($RESULT). Patterns are unanchored (regexp.MatchString), matching the
+// "found anywhere in the output" reading documented in seed examples.
+//
+// Both pattern fields gate independently — an assertion may declare ABSENT
+// AND PRESENT patterns and both will fire. A malformed pattern in one field
+// does not suppress evaluation of the other (each compile failure surfaces
+// its own malformed reason).
+//
+// Reasons:
+//   - pattern_unexpectedly_present — pattern_absent's regex matched got.Repr.
+//   - pattern_unexpectedly_absent — pattern_present's regex did not match.
+//   - pattern_compile_failed — one of the pattern fields is not a valid
+//     Go regexp; the message names which field (pattern_absent or
+//     pattern_present) and includes the regexp library's compile error.
+func matchActionOutputPattern(branch string, a Assertion, got runner.ExecResult) []Reason {
+	if a.Type != "output_match" {
+		return nil
+	}
+	if a.PatternAbsent == "" && a.PatternPresent == "" {
+		return nil
+	}
+	var out []Reason
+
+	if a.PatternAbsent != "" {
+		re, err := regexp.Compile(a.PatternAbsent)
+		if err != nil {
+			out = append(out, Reason{
+				Code: "pattern_compile_failed",
+				Message: fmt.Sprintf("%s assertion.pattern_absent %q failed to compile: %v",
+					branch, a.PatternAbsent, err),
+			})
+		} else if re.MatchString(got.Repr) {
+			out = append(out, Reason{
+				Code: "pattern_unexpectedly_present",
+				Message: fmt.Sprintf("%s output matched pattern_absent /%s/ but spec required absence (got: %s)",
+					branch, a.PatternAbsent, truncateForReason(got.Repr)),
+			})
+		}
+	}
+
+	if a.PatternPresent != "" {
+		re, err := regexp.Compile(a.PatternPresent)
+		if err != nil {
+			out = append(out, Reason{
+				Code: "pattern_compile_failed",
+				Message: fmt.Sprintf("%s assertion.pattern_present %q failed to compile: %v",
+					branch, a.PatternPresent, err),
+			})
+		} else if !re.MatchString(got.Repr) {
+			out = append(out, Reason{
+				Code: "pattern_unexpectedly_absent",
+				Message: fmt.Sprintf("%s output did not match pattern_present /%s/ but spec required presence (got: %s)",
+					branch, a.PatternPresent, truncateForReason(got.Repr)),
+			})
+		}
+	}
+
+	return out
+}
+
 // truncateForReason caps long output strings so Reason.Message stays readable
 // in CLI/JSON dumps. EXPLAIN output runs to several KB; the first ~200 chars
 // is enough to diagnose most mismatches without flooding the report.
