@@ -28,6 +28,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/runlog-org/runlog-verifier/internal/clientconfig"
 	"github.com/runlog-org/runlog-verifier/internal/fingerprint"
 	"github.com/runlog-org/runlog-verifier/internal/keystore"
 	"github.com/runlog-org/runlog-verifier/internal/sign"
@@ -80,11 +81,17 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `runlog-verifier — Runlog signed verification agent
 
 Usage:
-  runlog-verifier register --email <addr> [--force] [--server <url>]
-        Generate (or load) a persistent Ed25519 keypair at ~/.runlog/key
-        and register the public key with the Runlog server. Required once
-        before `+"`verify`"+` can produce server-acceptable bundles.
-        Reads RUNLOG_API_KEY from the environment; --server overrides
+  runlog-verifier register --email <addr> [--force] [--no-browser] [--server <url>]
+        Cohesive registration flow:
+          1. Kick off a CLI registration with the server (POST /v1/register-cli).
+          2. Open the verification URL in your browser (or print it with
+             --no-browser) so you can confirm ownership of <addr>.
+          3. Poll until the server issues an API key, then persist it to
+             ~/.runlog/config.json (mode 0600).
+          4. Generate (or load) a persistent Ed25519 keypair at ~/.runlog/key
+             and register the public key with the server.
+        --force overwrites both an existing keypair AND an existing
+        config.json with a different api_key_id. --server overrides
         RUNLOG_API_URL (default: https://api.runlog.org).
 
   runlog-verifier verify <entry.yaml>
@@ -92,8 +99,9 @@ Usage:
         host fingerprint, sign a canonical-JSON bundle, and emit JSON to
         stdout. unit / integration tiers are accepted as well-formed but
         exit with status tier_unsupported until their runners land.
-        Requires RUNLOG_API_KEY (same as `+"`register`"+`); pre-flight checks the
-        server has the matching pubkey on file before signing.
+        Reads the API key from RUNLOG_API_KEY, or falls back to
+        ~/.runlog/config.json if `+"`register`"+` has been run; pre-flight
+        checks the server has the matching pubkey on file before signing.
 
   runlog-verifier keygen
         Generate a fresh Ed25519 keypair and emit JSON to stdout.
@@ -197,9 +205,19 @@ func runVerify(args []string) int {
 	// the verifier reports "signed OK".
 	apiKey := os.Getenv("RUNLOG_API_KEY")
 	if apiKey == "" {
+		// Fall back to the credential persisted by `register --email`.
+		// Without this fallback the cohesive register flow would still
+		// require the user to manually `export RUNLOG_API_KEY` before the
+		// next verify, defeating the point of writing config.json.
+		if k, _, cerr := clientconfig.Load(); cerr == nil {
+			apiKey = k
+		}
+	}
+	if apiKey == "" {
 		fmt.Fprintln(os.Stderr,
-			"verify: RUNLOG_API_KEY is not set. "+
-				"Get one at https://runlog.org/register and export it before retrying.")
+			"verify: no API key found — set RUNLOG_API_KEY or run "+
+				"'runlog-verifier register --email <addr>' first. "+
+				"Get a key at https://runlog.org/register.")
 		return 1
 	}
 	server := resolvePreflightServer(*serverFlag)
