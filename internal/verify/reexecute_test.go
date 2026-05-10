@@ -474,3 +474,47 @@ func TestCleanupReexecuteSandbox(t *testing.T) {
 		cleanupReexecuteSandbox(runner.SubprocessDriver{}, cas, nil, 5)
 	})
 }
+
+// TestRunReexecuteShareStateRejectedForNonDocker covers the F87 v0.1 gate:
+// cassette.runtime.share_state_across_mutations=true is only honored for
+// tool: docker. Other tools that set the flag get a typed
+// share_state_unsupported_for_tool rejection so the seed-author mistake
+// surfaces precisely.
+func TestRunReexecuteShareStateRejectedForNonDocker(t *testing.T) {
+	e := &Entry{
+		UnitID: "test-unit",
+		Verification: Verification{
+			Isolation:      "database",
+			TimeoutSeconds: 5,
+		},
+		FailedApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+		WorkingApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+	}
+	cas := &cassette.Cassette{
+		Mode: "reexecute",
+		Runtime: &cassette.Runtime{
+			Tool:                      "postgres",
+			ShareStateAcrossMutations: true,
+		},
+	}
+
+	res := runReexecute(e, cas)
+
+	if res.Status == "verified" {
+		t.Fatalf("expected rejection, got status=verified")
+	}
+	if len(res.Reasons) == 0 {
+		t.Fatalf("expected reasons, got none")
+	}
+	if res.Reasons[0].Code != "share_state_unsupported_for_tool" {
+		t.Errorf("reason.Code=%q, want share_state_unsupported_for_tool (msg=%q)",
+			res.Reasons[0].Code, res.Reasons[0].Message)
+	}
+	if !strings.Contains(res.Reasons[0].Message, "postgres") {
+		t.Errorf("reason.Message should name the offending tool; got %q", res.Reasons[0].Message)
+	}
+}

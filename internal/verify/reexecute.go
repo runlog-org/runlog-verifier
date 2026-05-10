@@ -357,6 +357,22 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 		))
 	}
 
+	// share_state_across_mutations is a docker-only optimization in v0.1
+	// (postgres/redis sharing leaks row state across mutations for ~1s
+	// savings — not worth the safety surface; see F-NN3 follow-up). Other
+	// tools setting the flag get a typed seed-author rejection so the
+	// mistake surfaces precisely rather than silently no-op'ing.
+	if cas.Runtime.ShareStateAcrossMutations && cas.Runtime.Tool != "docker" {
+		return rejected(res, "share_state_unsupported_for_tool", fmt.Sprintf(
+			"cassette.runtime.share_state_across_mutations=true is only "+
+				"supported for tool: docker in this verifier build (got "+
+				"tool: %q). Other tools provision in <1s and don't need "+
+				"the optimization; postgres/redis support is a follow-up "+
+				"once a real seed surfaces meaningful cold-start cost",
+			cas.Runtime.Tool,
+		))
+	}
+
 	// ── Branch step shape + inputs ────────────────────────────────────
 	// reexecute mode skips path-extract appending: setup/action steps run as
 	// shell or sql, and the captured $RESULT is stdout (already a string), so
