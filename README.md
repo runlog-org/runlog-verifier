@@ -68,6 +68,8 @@ runtime. There's no embedded interpreter, no Docker, no implicit setup.
 | `tool: shell`             | `sh`                      | —                                                                                                         |
 | `tool: sqlite`            | `sqlite3`                 | —                                                                                                         |
 | `tool: postgres`          | `psql`                    | `RUNLOG_VERIFY_PGURL` (default `postgres://localhost:5432/postgres`); the role must have `CREATEDB` privilege. |
+| `tool: redis`             | `redis-cli`               | `RUNLOG_VERIFY_REDISURL` (default `redis://localhost:6379`).                                              |
+| `tool: docker`            | `docker`                  | — (uses `DOCKER_HOST` env / default socket); the user must be able to run `docker` without `sudo`.        |
 
 The postgres driver provisions a fresh ephemeral `runlog_verify_<rand>`
 database per branch (and per mutation re-run) via `CREATE DATABASE`,
@@ -82,6 +84,20 @@ Quick local Postgres for testing:
 
     # Then point the verifier at it:
     export RUNLOG_VERIFY_PGURL=postgres://postgres@localhost:5432/postgres
+
+The docker driver provisions a fresh `runlog-verify-<8-hex>` sandbox
+prefix per branch (and per mutation re-run); the seed composes the
+prefix into its own container / image / network / buildx-builder names
+via `$DOCKER_PREFIX`, and teardown sweeps every prefix-matched resource
+best-effort. Stale resources from a crashed verifier can be swept
+manually with `docker ps -aq --filter 'name=^runlog-verify-' | xargs -r
+docker rm -f` (and similar for `images` / `network ls` / `buildx ls`).
+
+> **docker driver perf note.** Each branch run and each mutation re-run
+> starts containers and (for buildx-using seeds) initialises buildx —
+> typically ~30 s overhead per invocation. A 5-mutation seed can run
+> ~2.5 min minimum on a cold cache. Per-mutation container reuse is a
+> deferred optimisation; today every mutation is fully isolated.
 
 Verifier function-tier (`isolation: function`) entries continue to use
 the embedded Python driver and need only `python3` on PATH.
