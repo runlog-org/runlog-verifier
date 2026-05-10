@@ -107,6 +107,8 @@ func runUnit(e *Entry) Result {
 	reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
 	reasons = append(reasons, matchActionPlanNodeTiming("failed_approach", e.FailedApproach.Assertion, failedRes)...)
 	reasons = append(reasons, matchActionPlanNodeTiming("working_approach", e.WorkingApproach.Assertion, workingRes)...)
+	reasons = append(reasons, matchActionOutputPattern("failed_approach", e.FailedApproach.Assertion, failedRes)...)
+	reasons = append(reasons, matchActionOutputPattern("working_approach", e.WorkingApproach.Assertion, workingRes)...)
 
 	if len(reasons) > 0 {
 		return rejectedReasons(res, reasons)
@@ -268,6 +270,8 @@ func runUnitSubprocess(e *Entry) Result {
 	reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
 	reasons = append(reasons, matchActionPlanNodeTiming("failed_approach", e.FailedApproach.Assertion, failedRes)...)
 	reasons = append(reasons, matchActionPlanNodeTiming("working_approach", e.WorkingApproach.Assertion, workingRes)...)
+	reasons = append(reasons, matchActionOutputPattern("failed_approach", e.FailedApproach.Assertion, failedRes)...)
+	reasons = append(reasons, matchActionOutputPattern("working_approach", e.WorkingApproach.Assertion, workingRes)...)
 	if len(reasons) > 0 {
 		return rejectedReasons(res, reasons)
 	}
