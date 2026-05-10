@@ -51,8 +51,8 @@ failed_approach:
     - type: code
       lang: shell
       body: |
-        redis-cli -u "$REDIS_URL" SET k failed-value
-        redis-cli -u "$REDIS_URL" GET k | tr -d '\n'
+        redis-cli -u $REDIS_URL SET k failed-value
+        redis-cli -u $REDIS_URL GET k | tr -d '\n'
   assertion:
     type: string
     expect: success
@@ -63,8 +63,8 @@ working_approach:
     - type: code
       lang: shell
       body: |
-        redis-cli -u "$REDIS_URL" SET k working-value
-        redis-cli -u "$REDIS_URL" GET k | tr -d '\n'
+        redis-cli -u $REDIS_URL SET k working-value
+        redis-cli -u $REDIS_URL GET k | tr -d '\n'
   assertion:
     type: string
     expect: success

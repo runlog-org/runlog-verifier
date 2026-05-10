@@ -47,7 +47,7 @@ failed_approach:
     - type: code
       lang: shell
       body: |
-        docker run --rm --name "$DOCKER_PREFIX-test" alpine:3 echo -n failed-value
+        docker run --rm --name $DOCKER_PREFIX-test alpine:3 echo -n failed-value
   assertion:
     type: string
     expect: success
@@ -58,7 +58,7 @@ working_approach:
     - type: code
       lang: shell
       body: |
-        docker run --rm --name "$DOCKER_PREFIX-test" alpine:3 echo -n working-value
+        docker run --rm --name $DOCKER_PREFIX-test alpine:3 echo -n working-value
   assertion:
     type: string
     expect: success

@@ -43,7 +43,7 @@ failed_approach:
     - type: code
       lang: shell
       body: |
-        docker run --rm --name "$DOCKER_PREFIX-t" alpine:3 echo -n "$VALUE"
+        docker run --rm --name $DOCKER_PREFIX-t alpine:3 echo -n $VALUE
   assertion:
     type: string
     expect: success
@@ -54,7 +54,7 @@ working_approach:
     - type: code
       lang: shell
       body: |
-        docker run --rm --name "$DOCKER_PREFIX-t" alpine:3 echo -n "$VALUE"
+        docker run --rm --name $DOCKER_PREFIX-t alpine:3 echo -n $VALUE
   assertion:
     type: string
     expect: success

@@ -62,7 +62,7 @@ failed_approach:
     - type: code
       lang: shell
       body: |
-        psql -t -A --dbname="$DATABASE_URL" -c "SELECT v FROM kv WHERE k='x'" | tr -d '\n'
+        psql -t -A --dbname=$DATABASE_URL -c "SELECT v FROM kv WHERE k='x'" | tr -d '\n'
   assertion:
     type: string
     expect: success
@@ -78,7 +78,7 @@ working_approach:
     - type: code
       lang: shell
       body: |
-        psql -t -A --dbname="$DATABASE_URL" -c "SELECT v FROM kv WHERE k='x'" | tr -d '\n'
+        psql -t -A --dbname=$DATABASE_URL -c "SELECT v FROM kv WHERE k='x'" | tr -d '\n'
   assertion:
     type: string
     expect: success
