@@ -39,6 +39,8 @@ type Assertion struct {
 	Exception             string  `yaml:"exception"`
 	PlanningTimeSecondsGt float64 `yaml:"planning_time_seconds_gt,omitempty"`
 	PlanningTimeSecondsLt float64 `yaml:"planning_time_seconds_lt,omitempty"`
+	PatternAbsent         string  `yaml:"pattern_absent,omitempty"`
+	PatternPresent        string  `yaml:"pattern_present,omitempty"`
 }
 
 // Verification mirrors the schema's verification block.
