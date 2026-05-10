@@ -45,8 +45,32 @@ type Cassette struct {
 	SetupScript    []string
 	TeardownScript []string
 
+	// Sidecar fixtures, parsed in declaration order. Only `kind: sidecar_process`
+	// entries are populated; other fixture kinds in cassette.fixtures are
+	// silently skipped (the schema validates their shape, but the verifier
+	// has no runtime use for them yet).
+	SidecarFixtures []SidecarFixture
+
 	// Stable ordering of step keys so error messages are deterministic.
 	stepNames []string
+}
+
+// SidecarFixture is one parsed entry from cassette.fixtures with
+// `kind: sidecar_process`. Other fixture kinds (sparse_file, redis_instance,
+// docker_context, etc.) are not parsed by this verifier today; they are
+// schema-validated at submit time but the verifier has no runtime use for
+// them. Adding a typed model for another kind is a one-arm-per-kind
+// extension here.
+type SidecarFixture struct {
+	Name              string // the $FIXTURE_* token (key in cassette.fixtures)
+	Command           []string
+	Against           string // optional $FIXTURE_* ref; narrative only
+	ReadyStderrRegex  string // exactly one of these three is set
+	ReadyPathExists   string
+	ReadyDelaySeconds float64
+	Enabled           bool // schema default true; we materialize the default at parse time
+	StopGraceSeconds  int  // schema default 5; materialize at parse time
+	ExposePID         bool
 }
 
 // Runtime describes the host CLI a reexecute-mode cassette drives. tool is
@@ -113,6 +137,10 @@ func (c *Cassette) Clone() *Cassette {
 	if c.Runtime != nil {
 		rt := *c.Runtime
 		out.Runtime = &rt
+	}
+	out.SidecarFixtures = append([]SidecarFixture(nil), c.SidecarFixtures...)
+	for i := range out.SidecarFixtures {
+		out.SidecarFixtures[i].Command = append([]string(nil), c.SidecarFixtures[i].Command...)
 	}
 	for name, step := range c.Steps {
 		out.Steps[name] = Step{
@@ -189,6 +217,13 @@ func Parse(raw map[string]any) (*Cassette, error) {
 			return nil, err
 		}
 		c.TeardownScript = teardown
+	}
+	if rawFixtures, ok := raw["fixtures"]; ok {
+		sf, err := parseFixtures(rawFixtures)
+		if err != nil {
+			return nil, err
+		}
+		c.SidecarFixtures = sf
 	}
 
 	// yaml.v3 preserves insertion order for map[string]any only when the map
@@ -380,6 +415,105 @@ func parseHeadersAndBody(s string) (lines []string, body string, err error) {
 		return nil, "", errors.New("no start line")
 	}
 	return lines, body, nil
+}
+
+// parseFixtures decodes the cassette.fixtures map. The map is name-keyed
+// by $FIXTURE_* tokens; only `kind: sidecar_process` entries are returned
+// in declaration-order. Other kinds are skipped silently (the schema
+// validates their shape; the verifier just has no runtime use for them).
+//
+// The map is iterated in sorted key order for determinism — yaml.v3
+// loses map order when decoding through interface{}, so the seed's
+// declaration order is not recoverable. Sorted-name order is the
+// stable replacement; tests document this by using $FIXTURE_A,
+// $FIXTURE_B if order matters.
+func parseFixtures(raw any) ([]SidecarFixture, error) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("cassette.fixtures must be a mapping (got %T)", raw)
+	}
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]SidecarFixture, 0, len(names))
+	for _, name := range names {
+		entry, ok := m[name].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("cassette.fixtures.%s must be a mapping (got %T)", name, m[name])
+		}
+		kind, _ := entry["kind"].(string)
+		if kind != "sidecar_process" {
+			// schema covers the rest; runtime ignores them.
+			continue
+		}
+
+		sf := SidecarFixture{
+			Name:             name,
+			Enabled:          true, // schema default
+			StopGraceSeconds: 5,    // schema default
+		}
+
+		// Required: command (array of strings, length 1..64)
+		rawCmd, ok := entry["command"].([]any)
+		if !ok || len(rawCmd) == 0 {
+			return nil, fmt.Errorf("cassette.fixtures.%s.command must be a non-empty array of strings", name)
+		}
+		sf.Command = make([]string, len(rawCmd))
+		for i, c := range rawCmd {
+			s, ok := c.(string)
+			if !ok {
+				return nil, fmt.Errorf("cassette.fixtures.%s.command[%d] must be a string (got %T)", name, i, c)
+			}
+			sf.Command[i] = s
+		}
+
+		// Optional: against
+		if v, ok := entry["against"].(string); ok {
+			sf.Against = v
+		}
+
+		// Optional: ready_when (discriminated by property name)
+		if rw, ok := entry["ready_when"].(map[string]any); ok {
+			switch {
+			case len(rw) > 1:
+				return nil, fmt.Errorf("cassette.fixtures.%s.ready_when must declare exactly one of stderr_regex / path_exists / delay_seconds", name)
+			case rw["stderr_regex"] != nil:
+				if s, ok := rw["stderr_regex"].(string); ok {
+					sf.ReadyStderrRegex = s
+				}
+			case rw["path_exists"] != nil:
+				if s, ok := rw["path_exists"].(string); ok {
+					sf.ReadyPathExists = s
+				}
+			case rw["delay_seconds"] != nil:
+				switch v := rw["delay_seconds"].(type) {
+				case float64:
+					sf.ReadyDelaySeconds = v
+				case int:
+					sf.ReadyDelaySeconds = float64(v)
+				}
+			}
+		}
+
+		// Optional: enabled (default true)
+		if v, ok := entry["enabled"].(bool); ok {
+			sf.Enabled = v
+		}
+		// Optional: stop_grace_seconds (default 5)
+		if v, ok := entry["stop_grace_seconds"].(int); ok {
+			sf.StopGraceSeconds = v
+		}
+		// Optional: expose_pid (default false)
+		if v, ok := entry["expose_pid"].(bool); ok {
+			sf.ExposePID = v
+		}
+
+		out = append(out, sf)
+	}
+	return out, nil
 }
 
 // headersFromLines parses "Name: Value" lines into a canonicalized map.

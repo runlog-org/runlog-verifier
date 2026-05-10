@@ -67,6 +67,7 @@ package verify
 // =============================================================================
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -89,6 +90,135 @@ var reexecuteSupportedTools = map[string]bool{
 	"postgres": true,
 	"redis":    true,
 	"docker":   true,
+}
+
+// startSidecarFixtures iterates cas.SidecarFixtures and starts each enabled
+// sidecar (one whose name in inputs is unset, true, or any non-false value;
+// a mutate_fixture mutation that sets inputs[name] = false skips the start).
+// Returns handles in start-order so the caller can stop them in LIFO order
+// during cleanup. On any failure, all already-started sidecars are stopped
+// (best-effort) before returning so the caller can't leak processes.
+//
+// inputs is read-only here — start-time substitution applies $-token values
+// to each command argv element before exec. The orchestrator's existing
+// validateInputs guard runs before this hook, so reserved-env-var-shaped
+// keys can never reach the sidecar's argv.
+func startSidecarFixtures(ctx context.Context, cas *cassette.Cassette, inputs map[string]any) ([]*runner.SidecarHandle, *Reason) {
+	if cas == nil || len(cas.SidecarFixtures) == 0 {
+		return nil, nil
+	}
+	handles := make([]*runner.SidecarHandle, 0, len(cas.SidecarFixtures))
+	for _, sf := range cas.SidecarFixtures {
+		// Mutation override: inputs[name] == false → skip start.
+		if v, ok := inputs[sf.Name]; ok {
+			if b, isBool := v.(bool); isBool && !b {
+				continue
+			}
+		}
+		if !sf.Enabled {
+			continue
+		}
+		cfg := runner.SidecarConfig{
+			Name:             sf.Name,
+			Command:          substituteSidecarArgv(sf.Command, inputs),
+			StopGraceSeconds: sf.StopGraceSeconds,
+			ReadyWhen: runner.ReadyWhen{
+				StderrRegex:  sf.ReadyStderrRegex,
+				PathExists:   substituteOne(sf.ReadyPathExists, inputs),
+				DelaySeconds: sf.ReadyDelaySeconds,
+			},
+		}
+		env := sidecarEnvFromInputs(inputs)
+		h, err := (runner.SidecarDriver{}).Start(ctx, cfg, env)
+		if err != nil {
+			// Best-effort cleanup of already-started sidecars.
+			for _, prev := range handles {
+				_ = prev.Stop()
+			}
+			code := "sidecar_startup_failed"
+			if errors.Is(err, runner.ErrSidecarReadyTimeout) {
+				code = "sidecar_ready_timeout"
+			}
+			r := Reason{
+				Code:    code,
+				Message: fmt.Sprintf("fixture %s: %v", sf.Name, err),
+			}
+			return nil, &r
+		}
+		// expose_pid: when set, bind the PID into inputs so the action can
+		// signal the sidecar. The mutation-disable case takes precedence
+		// (handled above) so a disabled sidecar's name remains a false value
+		// in inputs, not a PID.
+		if sf.ExposePID {
+			if inputs == nil {
+				inputs = map[string]any{}
+			}
+			inputs[sf.Name] = h.PID
+		}
+		handles = append(handles, h)
+	}
+	return handles, nil
+}
+
+// stopSidecarFixtures stops a slice of running sidecars in LIFO order.
+// Failures are best-effort — the caller has already finished with the
+// branch action, so a hung sidecar's only harm is process noise; we
+// log via Reason{} accumulation only when it would help diagnostics.
+func stopSidecarFixtures(handles []*runner.SidecarHandle) {
+	for i := len(handles) - 1; i >= 0; i-- {
+		if handles[i] == nil {
+			continue
+		}
+		_ = handles[i].Stop()
+	}
+}
+
+// substituteSidecarArgv replaces any $-token argv element whose key is in
+// inputs with its string-form value. Non-token elements pass through
+// unchanged. This mirrors SubprocessDriver's client-side substitution but
+// scoped to argv arrays (whole-element match, not in-string interpolation).
+func substituteSidecarArgv(argv []string, inputs map[string]any) []string {
+	out := make([]string, len(argv))
+	for i, a := range argv {
+		out[i] = substituteOne(a, inputs)
+	}
+	return out
+}
+
+// substituteOne replaces s with the inputs[s] value if s is a $-prefixed
+// key whose name appears in inputs; otherwise returns s unchanged.
+// Intentionally narrow — no in-string interpolation, no recursive
+// substitution.
+func substituteOne(s string, inputs map[string]any) string {
+	if !strings.HasPrefix(s, "$") {
+		return s
+	}
+	if v, ok := inputs[s]; ok {
+		return fmt.Sprintf("%v", v)
+	}
+	return s
+}
+
+// sidecarEnvFromInputs flattens the inputs map into KEY=value form for
+// exec.Cmd.Env. Strips the leading $ from each $-prefixed key (so
+// $REDIS_URL becomes REDIS_URL=…) so the sidecar's child process sees
+// shell-conventional env vars. Non-string values are formatted via %v.
+//
+// The host's PATH/HOME/etc are NOT inherited — sidecars run in a fresh
+// env so they can't accidentally pick up the host shell's settings.
+// (Future opt-in: a `pass_through_env` field on the schema arm.)
+func sidecarEnvFromInputs(inputs map[string]any) []string {
+	env := make([]string, 0, len(inputs)+8)
+	// Always include PATH so the sidecar can find common utilities (sh,
+	// sleep, sqlite3 …). Other host vars are intentionally not passed.
+	if path := os.Getenv("PATH"); path != "" {
+		env = append(env, "PATH="+path)
+	}
+	for k, v := range inputs {
+		key := strings.TrimPrefix(k, "$")
+		env = append(env, fmt.Sprintf("%s=%v", key, v))
+	}
+	return env
 }
 
 // postgresBaseDSN returns the connection string the verifier uses as the
@@ -371,6 +501,18 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 			}
 		}
 	}
+
+	// Sidecar fixtures: start enabled sidecars after setup_script primes the
+	// sandbox, before the branch action runs. Stop them on every action-path
+	// return (success or failure) so cleanupReexecuteSandbox doesn't run with
+	// child processes still attached.
+	sidecarHandles, sidecarReason := startSidecarFixtures(context.Background(), cas, inputs)
+	if sidecarReason != nil {
+		cleanupReexecuteSandbox(driver, cas, inputs, timeout)
+		sidecarReason.Message = fmt.Sprintf("%s: %s", branchName, sidecarReason.Message)
+		return runner.ExecResult{}, runner.SubprocessDriver{}, sidecarReason, nil
+	}
+	defer stopSidecarFixtures(sidecarHandles)
 
 	res, err := driver.Run(setup, action, inputs, timeout)
 	if err != nil {
