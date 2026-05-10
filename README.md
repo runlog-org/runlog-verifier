@@ -38,6 +38,26 @@ The script is plain POSIX `sh` (`install.sh` at the repo root). It supports
 `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`. For other
 platforms, build from source per the [Build](#build) section below.
 
+## Getting started
+
+After installing, run a single command to register an account and provision
+the local signing keypair:
+
+    runlog-verifier register --email you@example.com
+
+The command kicks off a registration with the server, opens the verification
+URL in your browser (use `--no-browser` on a headless box and click the
+printed URL from another machine), polls until you confirm, then persists
+the issued API key to `~/.runlog/config.json` (mode `0600`) and uploads the
+local Ed25519 public key from `~/.runlog/key`. After it returns, you can
+immediately verify entries:
+
+    runlog-verifier verify path/to/entry.yaml
+
+`verify` reads the API key from `RUNLOG_API_KEY` if set, otherwise falls
+back to `~/.runlog/config.json` — so once `register` succeeds, no further
+environment setup is required.
+
 ## Runtime requirements
 
 The verifier shells out to host-installed tools to drive each cassette
