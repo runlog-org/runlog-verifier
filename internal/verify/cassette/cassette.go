@@ -75,9 +75,14 @@ type SidecarFixture struct {
 
 // Runtime describes the host CLI a reexecute-mode cassette drives. tool is
 // required; version is advisory in v0.1 (logged, not enforced).
+// ShareStateAcrossMutations opts the cassette into the F87 optimization:
+// mutation re-runs within a branch reuse the baseline sandbox + skip
+// per-mutation setup_script. v0.1 honors this only for tool: docker;
+// other tools surface share_state_unsupported_for_tool at validation.
 type Runtime struct {
-	Tool    string
-	Version string
+	Tool                      string
+	Version                   string
+	ShareStateAcrossMutations bool
 }
 
 // Step is one recorded HTTP exchange.
@@ -281,7 +286,15 @@ func parseRuntime(raw any) (*Runtime, error) {
 		return nil, errors.New("cassette.runtime.tool is required and must be a non-empty string")
 	}
 	version, _ := m["version"].(string)
-	return &Runtime{Tool: tool, Version: version}, nil
+	share := false
+	if rawShare, ok := m["share_state_across_mutations"]; ok {
+		b, isBool := rawShare.(bool)
+		if !isBool {
+			return nil, fmt.Errorf("cassette.runtime.share_state_across_mutations must be a boolean (got %T)", rawShare)
+		}
+		share = b
+	}
+	return &Runtime{Tool: tool, Version: version, ShareStateAcrossMutations: share}, nil
 }
 
 // parseScriptLines decodes a setup_script / teardown_script field. Each

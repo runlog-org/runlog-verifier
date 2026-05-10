@@ -96,8 +96,22 @@ docker rm -f` (and similar for `images` / `network ls` / `buildx ls`).
 > **docker driver perf note.** Each branch run and each mutation re-run
 > starts containers and (for buildx-using seeds) initialises buildx —
 > typically ~30 s overhead per invocation. A 5-mutation seed can run
-> ~2.5 min minimum on a cold cache. Per-mutation container reuse is a
-> deferred optimisation; today every mutation is fully isolated.
+> ~2.5 min minimum on a cold cache. Cassettes can opt in to
+> `cassette.runtime.share_state_across_mutations: true` so mutation
+> re-runs within a branch re-use the baseline branch's already-
+> provisioned sandbox and skip the per-mutation re-execution of
+> `cassette.setup_script` — typically dropping a 5-mutation seed from
+> ~2.5 min to ~30 s on a cold cache. v0.1 honors this only for
+> `tool: docker`; postgres/redis share-state is a follow-up. The
+> seed author is responsible for share-state safety: mutations within
+> a branch must be idempotent against the shared sandbox state — use
+> `--rm` for transient containers, don't `mutate_fixture` on inputs
+> that `setup_script` consumes, and don't run state-mutating non-`--rm`
+> commands. Per-branch isolation is preserved (failed and working
+> still get separate sandboxes); only per-mutation isolation within a
+> branch is relaxed. Cassettes that set this flag with a non-docker
+> tool surface a typed `share_state_unsupported_for_tool` rejection
+> at validation time.
 
 Verifier function-tier (`isolation: function`) entries continue to use
 the embedded Python driver and need only `python3` on PATH.
