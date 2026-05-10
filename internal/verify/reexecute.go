@@ -25,10 +25,16 @@ package verify
 //                    provisioned per-branch via runner.ProvisionRedisDB and
 //                    exposed as $REDIS_URL. Redis interaction is through
 //                    redis-cli inside shell step bodies.
+//   tool: docker   → step.Lang must be "shell"; a per-branch sandbox
+//                    prefix (`runlog-verify-<8-hex>`) is provisioned via
+//                    runner.ProvisionDockerSandbox and exposed as
+//                    $DOCKER_PREFIX. The seed composes the prefix into its
+//                    own resource names; teardown walks prefix-matched
+//                    containers / images / networks / buildx builders.
 //
-// Other declared tools (git, docker) surface as `runtime_unsupported`. The
+// Other declared tools (git) surface as `runtime_unsupported`. The
 // slice deliberately keeps tool-specific drivers out of scope per CLAUDE.md
-// invariant #10 ("cheap and simple first") — adding a git/docker driver is a
+// invariant #10 ("cheap and simple first") — adding a git driver is a
 // one-tool follow-up.
 //
 // Per-branch sandbox lifecycle:
@@ -51,7 +57,7 @@ package verify
 // so a seed author who tries to mix them gets a precise diagnostic.
 //
 // Deliberately out of scope for this slice (follow-ups):
-//   - git / docker runtime tools
+//   - git runtime tool
 //   - cassette.runtime.version enforcement (advisory in v0.1)
 //   - regex-based stdout matching (failed_branch_must_return: {pattern: ...})
 //   - reexecute-mode replay_sequence semantics (per-branch sandboxes are
@@ -82,6 +88,7 @@ var reexecuteSupportedTools = map[string]bool{
 	"sqlite":   true,
 	"postgres": true,
 	"redis":    true,
+	"docker":   true,
 }
 
 // postgresBaseDSN returns the connection string the verifier uses as the
@@ -145,10 +152,15 @@ func redisDBNumFromURL(rawURL string) (int, bool) {
 // branchURL on success). Tools without a server-side resource (shell, sqlite)
 // return ("", "", nil) — the no-op case.
 //
-// This consolidates the previously duplicated postgres / redis provisioning
-// blocks in runReexecuteBranch into a single switch so adding a new tool
-// (docker, F71) is one new arm here plus one new provisioner pair in
-// runner/.
+// This consolidates the previously duplicated postgres / redis / docker
+// provisioning blocks in runReexecuteBranch into a single switch. Adding
+// a new tool is one new arm here plus one new provisioner pair in runner/.
+//
+// Note: docker's "branchURL" is actually a sandbox-name prefix
+// (`runlog-verify-<8-hex>`), not a URL — the inputsKey conventions vary
+// per tool ($DATABASE_URL, $REDIS_URL, $DOCKER_PREFIX). The orchestrator
+// treats this opaquely; the seed composes the value into its own
+// references.
 func provisionEphemeralResource(tool string) (inputsKey, branchURL string, err error) {
 	switch tool {
 	case "postgres":
@@ -163,6 +175,12 @@ func provisionEphemeralResource(tool string) (inputsKey, branchURL string, err e
 			return "", "", perr
 		}
 		return "$REDIS_URL", url, nil
+	case "docker":
+		sandboxID, perr := runner.ProvisionDockerSandbox()
+		if perr != nil {
+			return "", "", perr
+		}
+		return "$DOCKER_PREFIX", sandboxID, nil
 	}
 	return "", "", nil
 }
@@ -172,8 +190,9 @@ func provisionEphemeralResource(tool string) (inputsKey, branchURL string, err e
 // and `database` (sqlite-flavored). Other isolations declared by the schema
 // (compiler, docker_daemon) stay tier_unsupported until their drivers land.
 var reexecuteSupportedIsolations = map[string]bool{
-	"subprocess": true,
-	"database":   true,
+	"subprocess":    true,
+	"database":      true,
+	"docker_daemon": true,
 }
 
 // runReexecute handles tier == "integration" with cassette.mode == "reexecute".
@@ -186,8 +205,8 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	if !reexecuteSupportedIsolations[e.Verification.Isolation] {
 		return tierUnsupported(res, "isolation_unsupported", fmt.Sprintf(
 			"reexecute-mode isolation %q is not implemented in this verifier "+
-				"build — subprocess + database (sqlite) ship first; "+
-				"compiler / docker_daemon land in follow-up commits",
+				"build — subprocess + database + docker_daemon ship first; "+
+				"compiler lands in follow-up commits",
 			e.Verification.Isolation,
 		))
 	}
@@ -202,8 +221,8 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	if !reexecuteSupportedTools[cas.Runtime.Tool] {
 		return tierUnsupported(res, "runtime_unsupported", fmt.Sprintf(
 			"cassette.runtime.tool %q is not implemented in this verifier "+
-				"build — shell + sqlite + postgres + redis ship first; "+
-				"git / docker land in follow-up commits",
+				"build — shell + sqlite + postgres + redis + docker ship first; "+
+				"git lands in follow-up commits",
 			cas.Runtime.Tool,
 		))
 	}
@@ -389,6 +408,10 @@ func cleanupReexecuteSandbox(driver runner.SubprocessDriver, cas *cassette.Casse
 				_ = runner.DropRedisDB(redisBaseURL(), dbNum)
 			}
 		}
+	case "docker":
+		if sandboxID, ok := inputs["$DOCKER_PREFIX"].(string); ok && sandboxID != "" {
+			_ = runner.CleanDockerSandbox(sandboxID)
+		}
 	}
 }
 
@@ -414,6 +437,8 @@ func reexecuteRunErrorCode(err error, defaultCode string) string {
 	case errors.Is(err, runner.ErrPostgresProvision):
 		return "runtime_provision_failed"
 	case errors.Is(err, runner.ErrRedisProvision):
+		return "runtime_provision_failed"
+	case errors.Is(err, runner.ErrDockerProvision):
 		return "runtime_provision_failed"
 	}
 	return defaultCode
