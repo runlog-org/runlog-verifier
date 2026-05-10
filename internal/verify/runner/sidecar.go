@@ -322,7 +322,7 @@ func (h *SidecarHandle) waitForReady(rw ReadyWhen, stderrRE *regexp.Regexp, matc
 				return nil
 			case <-h.waitDone:
 				return fmt.Errorf("%w: %s: process exited before ready (err=%v, stderr=%q)",
-					ErrSidecarStartup, h.Name, h.waitErr, h.StderrTail())
+					ErrSidecarStartup, h.Name, h.waitErr, redactStderr(h.StderrTail()))
 			case <-deadline.C:
 				return fmt.Errorf("%w: %s: stderr_regex %q not matched in %s",
 					ErrSidecarReadyTimeout, h.Name, rw.StderrRegex, timeout)
@@ -338,7 +338,7 @@ func (h *SidecarHandle) waitForReady(rw ReadyWhen, stderrRE *regexp.Regexp, matc
 			select {
 			case <-h.waitDone:
 				return fmt.Errorf("%w: %s: process exited before ready (err=%v, stderr=%q)",
-					ErrSidecarStartup, h.Name, h.waitErr, h.StderrTail())
+					ErrSidecarStartup, h.Name, h.waitErr, redactStderr(h.StderrTail()))
 			case <-deadline.C:
 				return fmt.Errorf("%w: %s: path %q did not exist in %s",
 					ErrSidecarReadyTimeout, h.Name, rw.PathExists, timeout)
@@ -363,7 +363,7 @@ func (h *SidecarHandle) sleepOrExit(d time.Duration) error {
 	select {
 	case <-h.waitDone:
 		return fmt.Errorf("%w: %s: process exited before ready (err=%v, stderr=%q)",
-			ErrSidecarStartup, h.Name, h.waitErr, h.StderrTail())
+			ErrSidecarStartup, h.Name, h.waitErr, redactStderr(h.StderrTail()))
 	case <-t.C:
 		return nil
 	}
@@ -412,6 +412,12 @@ func (h *SidecarHandle) appendStderr(b []byte) {
 // context to typed reasons when Start fails OR when an action fails
 // and the sidecar's output might explain why. Never returns more than
 // the cap.
+//
+// The returned bytes are RAW — callers who fold this into an error
+// message that may end up in a signed bundle must run the result
+// through redactStderr (see subprocess.go) so token-shaped substrings
+// (API keys, bearer tokens) are masked. The driver's own ErrSidecar*
+// error messages already do this; external callers must follow suit.
 func (h *SidecarHandle) StderrTail() []byte {
 	h.stderrMu.Lock()
 	defer h.stderrMu.Unlock()

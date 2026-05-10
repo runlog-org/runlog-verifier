@@ -578,11 +578,9 @@ func reexecuteRunErrorCode(err error, defaultCode string) string {
 		return "branch_timeout"
 	case errors.Is(err, runner.ErrLanguageUnsupported), errors.Is(err, runner.ErrSubprocessTool):
 		return "language_not_yet_implemented"
-	case errors.Is(err, runner.ErrPostgresProvision):
-		return "runtime_provision_failed"
-	case errors.Is(err, runner.ErrRedisProvision):
-		return "runtime_provision_failed"
-	case errors.Is(err, runner.ErrDockerProvision):
+	case errors.Is(err, runner.ErrPostgresProvision),
+		errors.Is(err, runner.ErrRedisProvision),
+		errors.Is(err, runner.ErrDockerProvision):
 		return "runtime_provision_failed"
 	}
 	return defaultCode

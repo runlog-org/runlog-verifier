@@ -84,19 +84,41 @@ func ProvisionDockerSandbox() (sandboxID string, err error) {
 // released), then images, then networks, then buildx builders. Empty
 // sandboxID is treated as a no-op (return nil) so the orchestrator's
 // teardown can call this unconditionally.
+//
+// Containers / images / networks all share the same shape (list-by-filter
+// → rm-by-id) so they go through cleanDockerByFilter; buildx is its own
+// path because `docker buildx ls` doesn't accept --filter and treats list
+// failure as a clean no-op rather than an error.
 func CleanDockerSandbox(sandboxID string) error {
 	if sandboxID == "" {
 		return nil
 	}
 	var errs []error
-	if err := cleanDockerContainers(sandboxID); err != nil {
-		errs = append(errs, err)
+	cleanups := []struct {
+		label    string // diagnostic label, also used in the rm command label
+		listArgs []string
+		rmArgs   []string // prefixed onto the resource id
+	}{
+		{
+			label:    "containers",
+			listArgs: []string{"ps", "-aq", "--filter", "name=^" + sandboxID},
+			rmArgs:   []string{"rm", "-f"},
+		},
+		{
+			label:    "images",
+			listArgs: []string{"images", "-q", "--filter", "reference=" + sandboxID + "*"},
+			rmArgs:   []string{"rmi", "-f"},
+		},
+		{
+			label:    "networks",
+			listArgs: []string{"network", "ls", "-q", "--filter", "name=^" + sandboxID},
+			rmArgs:   []string{"network", "rm"},
+		},
 	}
-	if err := cleanDockerImages(sandboxID); err != nil {
-		errs = append(errs, err)
-	}
-	if err := cleanDockerNetworks(sandboxID); err != nil {
-		errs = append(errs, err)
+	for _, c := range cleanups {
+		if err := cleanDockerByFilter(sandboxID, c.label, c.listArgs, c.rmArgs); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if err := cleanDockerBuildxBuilders(sandboxID); err != nil {
 		errs = append(errs, err)
@@ -104,58 +126,21 @@ func CleanDockerSandbox(sandboxID string) error {
 	return errors.Join(errs...)
 }
 
-// cleanDockerContainers removes every container whose name starts with
-// sandboxID. Uses `docker ps -aq --filter name=^<prefix>` to enumerate
-// (the `^` anchor matches the start of the name) then `docker rm -f`
-// per id. A "nothing to remove" enumeration is a no-op (returns nil).
-func cleanDockerContainers(sandboxID string) error {
-	ids, err := dockerListResources("ps",
-		[]string{"-aq", "--filter", "name=^" + sandboxID})
+// cleanDockerByFilter implements the shared "list resources matching a
+// sandboxID-derived filter, then `docker rm` each id" shape used by
+// containers, images, and networks. List-failure surfaces as
+// ErrDockerProvision; per-id rm failures abort the loop with the wrapped
+// CLI error.
+func cleanDockerByFilter(sandboxID, label string, listArgs, rmArgs []string) error {
+	ids, err := dockerListResources(listArgs[0], listArgs[1:])
 	if err != nil {
-		return fmt.Errorf("%w: list containers for %q: %v",
-			ErrDockerProvision, sandboxID, err)
+		return fmt.Errorf("%w: list %s for %q: %v",
+			ErrDockerProvision, label, sandboxID, err)
 	}
 	for _, id := range ids {
-		if err := execProvisionCLI("docker", []string{"rm", "-f", id},
-			ErrDockerProvision, "docker rm -f "+id); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// cleanDockerImages removes every image whose reference matches
-// sandboxID*. Uses `docker images -q --filter reference=<prefix>*` to
-// enumerate then `docker rmi -f` per id.
-func cleanDockerImages(sandboxID string) error {
-	ids, err := dockerListResources("images",
-		[]string{"-q", "--filter", "reference=" + sandboxID + "*"})
-	if err != nil {
-		return fmt.Errorf("%w: list images for %q: %v",
-			ErrDockerProvision, sandboxID, err)
-	}
-	for _, id := range ids {
-		if err := execProvisionCLI("docker", []string{"rmi", "-f", id},
-			ErrDockerProvision, "docker rmi -f "+id); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// cleanDockerNetworks removes every network whose name starts with
-// sandboxID. Uses `docker network ls -q --filter name=^<prefix>` then
-// `docker network rm` per id.
-func cleanDockerNetworks(sandboxID string) error {
-	ids, err := dockerListResources("network",
-		[]string{"ls", "-q", "--filter", "name=^" + sandboxID})
-	if err != nil {
-		return fmt.Errorf("%w: list networks for %q: %v",
-			ErrDockerProvision, sandboxID, err)
-	}
-	for _, id := range ids {
-		if err := execProvisionCLI("docker", []string{"network", "rm", id},
-			ErrDockerProvision, "docker network rm "+id); err != nil {
+		full := append(append([]string(nil), rmArgs...), id)
+		if err := execProvisionCLI("docker", full,
+			ErrDockerProvision, "docker "+strings.Join(full, " ")); err != nil {
 			return err
 		}
 	}
