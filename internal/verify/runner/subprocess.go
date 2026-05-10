@@ -314,6 +314,11 @@ func (d SubprocessDriver) validateSteps(steps []Step) error {
 				return fmt.Errorf("%w: tool=redis requires lang=shell, got %q",
 					ErrSubprocessTool, s.Lang)
 			}
+		case "docker":
+			if lang != "shell" {
+				return fmt.Errorf("%w: tool=docker requires lang=shell, got %q",
+					ErrSubprocessTool, s.Lang)
+			}
 		default:
 			return fmt.Errorf("%w: SubprocessDriver tool %q is not implemented",
 				ErrSubprocessTool, d.Tool)
