@@ -602,13 +602,23 @@ func reexecuteRunErrorCode(err error, defaultCode string) string {
 	return defaultCode
 }
 
-// runReexecuteMutations applies each declared mutation in a fresh per-mutation
-// sandbox and verifies the outcome matches the declared expectation. Cassette-
-// response mutations (mutate_cassette_response) are unsupported at reexecute
-// tier — they surface as mutation_strategy_unsupported so authors don't mix
-// them into a non-HTTP cassette. The shared aggregation loop lives in
-// iterateMutations (mutate.go); this wrapper just closes over cas.
+// runReexecuteMutations applies each declared mutation and verifies the outcome
+// matches the declared expectation. Cassette-response mutations
+// (mutate_cassette_response) are unsupported at reexecute tier — they surface
+// as mutation_strategy_unsupported so authors don't mix them into a non-HTTP
+// cassette. The shared aggregation loop lives in iterateMutations (mutate.go).
+//
+// When cas.Runtime.ShareStateAcrossMutations is true the F87 shared-state path
+// is taken: mutations re-use the baseline branch's already-provisioned sandbox
+// and skip per-mutation setup_script re-execution. The tool-specific gate in
+// runReexecute already rejects non-docker tools before we reach here, so the
+// shared path trusts cas.Runtime.Tool == "docker".
 func runReexecuteMutations(e *Entry, b mutationBaseline, cas *cassette.Cassette) ([]Reason, bool) {
+	if cas.Runtime != nil && cas.Runtime.ShareStateAcrossMutations {
+		return iterateMutations(e, func(m Mutation, i int) ([]Reason, bool) {
+			return runOneReexecuteMutationShared(e, b, m, i, cas)
+		})
+	}
 	return iterateMutations(e, func(m Mutation, i int) ([]Reason, bool) {
 		return runOneReexecuteMutation(e, b, m, i, cas)
 	})
@@ -681,6 +691,77 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 			}
 			return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
 		}()
+	})
+	return reasons, true
+}
+
+// runOneReexecuteMutationShared is the F87 share-state variant of
+// runOneReexecuteMutation. It re-uses the baseline branch's already-
+// provisioned sandbox (workdir + ephemeral resource) and skips the
+// per-mutation re-execution of cassette.setup_script — the mutation runs
+// only its perturbed action against the baseline driver. Per-branch
+// isolation is preserved (failed and working still have separate
+// sandboxes); per-mutation isolation within a branch is what's relaxed.
+// Cleanup remains at end-of-runReexecute via the existing deferred
+// cleanupReexecuteSandbox calls; no per-mutation cleanup is scheduled
+// here.
+//
+// Routed only when cas.Runtime.ShareStateAcrossMutations is true; the
+// tool-specific gate in runReexecute already rejects non-docker tools
+// with this flag set, so this function trusts that cas.Runtime.Tool
+// is "docker". See plan M04-F87 for the full safety contract.
+func runOneReexecuteMutationShared(e *Entry, b mutationBaseline, m Mutation, idx int, cas *cassette.Cassette) ([]Reason, bool) {
+	if isCassetteResponseStrategy(m.Strategy) {
+		return []Reason{{
+			Code: "mutation_strategy_unsupported",
+			Message: fmt.Sprintf(
+				"mutation #%d strategy %q targets a cassette response, but reexecute "+
+					"mode has no HTTP responses to perturb. Use mutate_fixture / "+
+					"set_literal_value / swap_* / remove_kwarg / drop_flag at "+
+					"reexecute tier",
+				idx+1, m.Strategy),
+		}}, false
+	}
+	strat, ok := strategies[m.Strategy]
+	if !ok {
+		return strategyUnsupportedReason(idx, m.Strategy), false
+	}
+
+	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
+		mutInputs, mutAction, err := strat.apply(baseline, m)
+		if err != nil {
+			return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
+		}
+
+		// Re-use the baseline driver (already pointing at the baseline's
+		// workdir + holding the same $DOCKER_PREFIX in mutInputs after
+		// strat.apply preserved it). No new tmpdir, no setup_script
+		// re-run, no provisionEphemeralResource. Cleanup happens once at
+		// end-of-runReexecute via the existing deferred
+		// cleanupReexecuteSandbox(failedDriver, ...) /
+		// cleanupReexecuteSandbox(workingDriver, ...).
+		got, runErr := baseline.Driver.Run(baseline.Setup, mutAction, mutInputs, b.Timeout)
+		if runErr != nil {
+			if isEnvErr(runErr) {
+				return []Reason{mutationRunnerErrorReason(idx, m, branch, runErr)}
+			}
+			// Non-environmental error (e.g. ErrInputInvalidName) folds into
+			// a synthesized crash so classifyOutcome produces outcomeFail —
+			// matches the isolated path's behavior on the same error class.
+			got = synthesizeMutationCrash(runErr)
+		}
+
+		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
+		if actual == expected {
+			return nil
+		}
+		if expected == outcomeFail &&
+			actual == outcomeUnchanged &&
+			discriminatingStrategies[m.Strategy] &&
+			!stepBodiesEqual(baseline.Action, mutAction) {
+			return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, "source")}
+		}
+		return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
 	})
 	return reasons, true
 }

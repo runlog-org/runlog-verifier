@@ -480,6 +480,120 @@ func TestCleanupReexecuteSandbox(t *testing.T) {
 // tool: docker. Other tools that set the flag get a typed
 // share_state_unsupported_for_tool rejection so the seed-author mistake
 // surfaces precisely.
+// TestReexecuteMutationSharedPathSkipsProvision covers the F87 dispatcher in
+// runReexecuteMutations: when cassette.runtime.share_state_across_mutations
+// is true, mutations run via runOneReexecuteMutationShared which re-uses the
+// baseline driver and does NOT re-provision a sandbox per mutation. We assert
+// the structural wiring by counting Driver.Run invocations against a stub
+// driver: with share=true and N mutations each targeting working_approach only,
+// the stub should record exactly N Run calls (one per mutation × one branch).
+//
+// driverFunc (defined at file scope below) adapts a plain function to
+// runner.Driver — no host-tool dependency; pure in-process.
+func TestReexecuteMutationSharedPathSkipsProvision(t *testing.T) {
+	// calls counts invocations of the stub working-branch driver.
+	calls := 0
+
+	// fixedResult is what the stub driver always returns. Because the stub
+	// returns this for every Run call, execResultsEqual(got, baseline) is
+	// true → classifyOutcome returns outcomeUnchanged, matching
+	// ExpectedResult: "unchanged" on each mutation → no reasons emitted.
+	fixedResult := runner.ExecResult{
+		Raised:       false,
+		TypeName:     "int",
+		Serializable: true,
+		JSONValue:    []byte("42"),
+	}
+
+	workingDriver := driverFunc(func(_, _ []runner.Step, _ map[string]any, _ float64) (runner.ExecResult, error) {
+		calls++
+		return fixedResult, nil
+	})
+	failedDriver := driverFunc(func(_, _ []runner.Step, _ map[string]any, _ float64) (runner.ExecResult, error) {
+		t.Error("Failed branch Driver.Run called unexpectedly in share=true path")
+		return runner.ExecResult{}, nil
+	})
+
+	b := mutationBaseline{
+		Working: branchBaseline{
+			Setup:  nil,
+			Action: []runner.Step{{Type: "code", Lang: "shell", Body: "echo 42"}},
+			Inputs: map[string]any{"$x": "hello"},
+			Result: fixedResult,
+			Driver: workingDriver,
+		},
+		// Failed branch is not targeted by these mutations (branch defaults to
+		// working_approach), so failedDriver.Run must never be called.
+		Failed: branchBaseline{
+			Setup:  nil,
+			Action: []runner.Step{{Type: "code", Lang: "shell", Body: "echo bad"}},
+			Inputs: map[string]any{"$x": "hello"},
+			Result: runner.ExecResult{Raised: true, Exception: "RuntimeError", Message: "fail"},
+			Driver: failedDriver,
+		},
+		Diff:    nil,
+		Timeout: 5,
+	}
+
+	// 2 mutations, each targeting working_approach (the default branch),
+	// strategy set_literal_value. The stub always returns fixedResult, so
+	// classifyOutcome → outcomeUnchanged == expected → no reasons.
+	e := &Entry{
+		UnitID: "stub-unit",
+		Verification: Verification{
+			TimeoutSeconds: 5,
+			Mutations: []Mutation{
+				{
+					Strategy:       "set_literal_value",
+					Target:         "$x",
+					NewValue:       "mutated-1",
+					ExpectedResult: "unchanged",
+				},
+				{
+					Strategy:       "set_literal_value",
+					Target:         "$x",
+					NewValue:       "mutated-2",
+					ExpectedResult: "unchanged",
+				},
+			},
+		},
+		WorkingApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "shell", Body: "echo 42"}},
+		},
+	}
+
+	cas := &cassette.Cassette{
+		Mode: "reexecute",
+		Runtime: &cassette.Runtime{
+			Tool:                      "docker",
+			ShareStateAcrossMutations: true,
+		},
+	}
+
+	reasons, supported := runReexecuteMutations(e, b, cas)
+
+	if !supported {
+		t.Fatalf("share=true path returned supported=false; reasons: %v", reasons)
+	}
+	if len(reasons) != 0 {
+		t.Errorf("expected no reasons for matching outcomes, got: %v", reasons)
+	}
+	// 2 mutations × 1 branch (working_approach) = 2 Driver.Run calls.
+	if calls != 2 {
+		t.Errorf("Driver.Run call count = %d, want 2 (one per mutation on working_approach)", calls)
+	}
+}
+
+// driverFunc is an adapter that turns a Run-shaped function into a
+// runner.Driver. Defined at file scope so it satisfies the interface without
+// needing a test-local type assertion workaround.
+// Only used by TestReexecuteMutationSharedPathSkipsProvision.
+type driverFunc func(setup, action []runner.Step, inputs map[string]any, timeout float64) (runner.ExecResult, error)
+
+func (f driverFunc) Run(setup, action []runner.Step, inputs map[string]any, timeout float64) (runner.ExecResult, error) {
+	return f(setup, action, inputs, timeout)
+}
+
 func TestRunReexecuteShareStateRejectedForNonDocker(t *testing.T) {
 	e := &Entry{
 		UnitID: "test-unit",
