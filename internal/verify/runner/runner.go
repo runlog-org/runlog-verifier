@@ -4,7 +4,12 @@
 // driver (see python.go) and `isolation: subprocess` / `isolation:
 // database` / `isolation: docker_daemon` (with cassette.runtime.tool ∈
 // {shell, sqlite, postgres, redis, docker}) via SubprocessDriver (see
-// subprocess.go); other isolation values declared by the schema
+// subprocess.go). The reexecute-mode docker tool additionally supports
+// `cassette.runtime.share_state_across_mutations: true` to share the
+// baseline sandbox + skip per-mutation setup_script re-execution; see
+// the README for the seed-authoring contract.
+//
+// Other isolation values declared by the schema
 // (compiler, http_client) are recognised by the registry but not yet
 // implemented — callers surface a typed `isolation_unsupported` reason
 // naming the requested value so the unit-tier check can degrade to
