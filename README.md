@@ -8,7 +8,7 @@
 
 > **About this project:** Runlog is a hobby side project by [Volker Otto](https://volkerotto.net) — not a commercial product today. A paid model is not ruled out for a later stage. See [About this project](https://runlog.org/#about) for the canonical framing.
 
-Reproducible-build binary distributed via package managers (`brew install runlog-verifier`, apt). Wraps test execution on the submitter's machine, runs both branches (§5.3), records integration cassettes (§7.5), and signs the bundle before submission. Target size: ~200 lines.
+Reproducible-build binary distributed via signed GitHub Releases — `install.sh` (POSIX `sh`, verifies SHA256) and prebuilt `.deb` artifacts for Debian / Ubuntu (amd64, arm64). A Homebrew tap and a hosted apt repo are tracked under milestone **M04**. Wraps test execution on the submitter's machine, runs both branches (§5.3), records or re-executes integration cassettes (§7.5), and signs the bundle before submission.
 
 **Must be public.** The trust model depends on anyone being able to verify that the binary matches the source (§5.4).
 
@@ -118,17 +118,17 @@ the embedded Python driver and need only `python3` on PATH.
 
 ## Layout
 
-- `cmd/runlog-verifier/` — entry point
-- `internal/verify/` — declarative verification of `assertion_only` entries
-  (branch presence, non-tautology, mutation structure + discrimination,
-  primitives allow-list)
-- `internal/differential/` — both-branch executor for `unit` tier (§5.3) — to land
-- `internal/mutation/` — mutation testing on the working branch — to land
-- `internal/cassette/` — HTTP/RPC recorder for integration-tier entries (§7.5) — to land
-- `internal/fingerprint/` — OS/runtime/package environment capture
-- `internal/sanitize/` — pre-sign allow-list check (§8) — to land
-- `internal/sign/` — embedded key + bundle signing
-- `internal/token/` — time-limited verification tokens (anti-replay) — to land
+- `cmd/runlog-verifier/` — CLI entry point (`verify`, `register`, `keygen`, `version`)
+- `internal/verify/` — verification orchestrator. `assertion_only` declarative
+  checks (branch presence, non-tautology, mutation structure + discrimination,
+  primitives allow-list), `unit`-tier subprocess execution, integration-tier
+  replay (`http_client`) and reexecute drivers (`shell`, `sqlite`, `postgres`,
+  `redis`, `docker`), mutation testing on the working branch, cassette parsing
+- `internal/fingerprint/` — OS / runtime / git environment capture for the bundle
+- `internal/sign/` — Ed25519 keypair + canonical-JSON bundle signing
+- `internal/clientconfig/` — persisted client config at `~/.runlog/config.json` (F73)
+- `internal/keystore/` — persisted local Ed25519 keypair at `~/.runlog/key`
+- `internal/sanitize/` — pre-sign allow-list check (§8)
 
 ## Depends on
 
@@ -151,21 +151,36 @@ First-time setup on a fresh machine:
 Reproducible-build flags (`-trimpath -buildvcs=false`) are wired into
 the Makefile and validated on every push by
 [`.github/workflows/verifier.yml`](./.github/workflows/verifier.yml).
-Two consecutive builds must hash identically or CI fails. Signed-release
-publishing of tagged binaries is deferred to the first Phase 2 release.
+Two consecutive builds must hash identically or CI fails. Tagged
+releases (`v0.1.0`, `v0.2.0`, `v0.3.0`, …) publish signed binaries
+plus `.deb` artifacts via the release workflow — see
+[`RELEASING.md`](./RELEASING.md).
 
 ## CLI status
 
-`assertion_only` entries are fully verified declaratively: branch
-presence, non-tautology, mutation structure (schema rules §1–§3),
-mutation discrimination (§5.3 step 4), and the primitives allow-list
-all run on every `verify` call, producing a signed JSON bundle.
+All three verification tiers are functional:
 
-`unit` and `integration` tiers parse but exit with status
-`tier_unsupported` (exit code 4). Subprocess execution and cassette
-replay are still to land in Phase 2. The CLI's output shape is stable
-and the server's `verification_signature` parameter already accepts
-(and ignores) bundles in this format.
+- **`assertion_only`** — declarative checks: branch presence,
+  non-tautology, mutation structure (schema rules §1–§3), mutation
+  discrimination (§5.3 step 4), primitives allow-list.
+- **`unit`** — subprocess execution against the embedded Python driver
+  (`isolation: function`); literals merge, `python_expr` inputs, length /
+  contains_exception_type / path matchers, mutation testing across all
+  in-scope strategies (`set_literal_value`, `mutate_fixture`,
+  `swap_function_call`, `swap_identifier`, `remove_kwarg`, `drop_flag`).
+  Other isolations (`subprocess`, `compiler`, `database`, `http_client`,
+  `docker_daemon`) surface a typed `isolation_unsupported` reason.
+- **`integration`** — both cassette modes ship: `replay` for
+  `isolation: http_client` (httptest stub seeded from `cassette.steps`,
+  per-mutation cassette mutation via `mutate_cassette_response`), and
+  `reexecute` for `tool: shell | sqlite | postgres | redis | docker`
+  (per-branch sandbox driven via `runner.SubprocessDriver`, with the
+  docker driver supporting `cassette.runtime.share_state_across_mutations`).
+
+The CLI's output shape is stable; the server's `verification_signature`
+parameter validates submitted bundles against the registered public key
+when `RUNLOG_REQUIRE_REGISTERED_PUBKEY` is `reject` (currently `warn`
+in production — see the project SCHEDULED.md for the flip trigger).
 
 Exit codes: `0` verified, `1` user error, `2` internal error,
-`3` rejected, `4` tier not yet implemented.
+`3` rejected, `4` tier or runtime not yet implemented.
