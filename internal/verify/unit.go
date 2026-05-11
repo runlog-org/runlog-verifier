@@ -387,13 +387,13 @@ func runOneUnitSubprocessMutation(b mutationBaseline, m Mutation, idx int, tool 
 				idx+1, m.Strategy),
 		}}, false
 	}
-	strat, ok := strategies[m.Strategy]
+	strat, ok := resolveMutationStrategy(m)
 	if !ok {
 		return strategyUnsupportedReason(idx, m.Strategy), false
 	}
 
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
-		mutInputs, mutAction, err := strat.apply(baseline, m)
+		mutInputs, mutSetup, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
 			return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 		}
@@ -404,7 +404,7 @@ func runOneUnitSubprocessMutation(b mutationBaseline, m Mutation, idx int, tool 
 		return func() []Reason {
 			got, mutDriver, runReason, runErr := runUnitSubprocessBranch(
 				fmt.Sprintf("mutation #%d (%s) on %s", idx+1, m.Strategy, branch),
-				tool, baseline.Setup, mutAction, mutInputs, b.Timeout)
+				tool, mutSetup, mutAction, mutInputs, b.Timeout)
 			defer cleanupUnitSubprocessSandbox(mutDriver)
 
 			if runReason != nil {

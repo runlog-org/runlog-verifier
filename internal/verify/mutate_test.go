@@ -1,8 +1,12 @@
 package verify
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
 // mutationBaseYAML is a unit-tier entry where the working branch returns
@@ -672,6 +676,198 @@ func TestMutationDropFlag(t *testing.T) {
 	}
 }
 
+// TestDropFlagSetupScope covers B20: a drop_flag mutation whose target
+// names a setup-step type (`working_approach.setup.dockerfile`) must scan
+// and rewrite b.Setup, not b.Action. The token lives in the Dockerfile
+// body, so the historical action-only scan surfaced a zero-match
+// mutation_target_invalid even though the token was clearly present in
+// the setup body the target pointed at.
+func TestDropFlagSetupScope(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\nCOPY --link src dst\n"},
+		},
+		Action: []runner.Step{
+			{Type: "shell", Body: "echo hi"},
+		},
+		Inputs: map[string]any{"$X": 1},
+	}
+	m := Mutation{
+		Strategy: "drop_flag",
+		Target:   "working_approach.setup.dockerfile",
+		Token:    "--link",
+	}
+	gotInputs, gotSetup, gotAction, err := sourceRemoveStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "FROM alpine\nCOPY  src dst\n" {
+		t.Errorf("setup body = %q, want %q", gotSetup[0].Body, "FROM alpine\nCOPY  src dst\n")
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "echo hi" {
+		t.Errorf("action body = %q, want unchanged %q", gotAction[0].Body, "echo hi")
+	}
+	if gotInputs["$X"] != 1 {
+		t.Errorf("inputs[$X] = %v, want 1 (passthrough)", gotInputs["$X"])
+	}
+}
+
+// TestDropFlagActionScope covers the default scope: an action-prefixed
+// target (or any non-`*.setup.*` target) continues to scan b.Action — the
+// historical behaviour, preserved by mutationTargetScope's fallthrough.
+func TestDropFlagActionScope(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\nCOPY --link src dst\n"},
+		},
+		Action: []runner.Step{
+			{Type: "shell", Body: "docker build --no-cache ."},
+		},
+		Inputs: map[string]any{"$X": 1},
+	}
+	m := Mutation{
+		Strategy: "drop_flag",
+		Target:   "working_approach.action.shell",
+		Token:    "--no-cache",
+	}
+	_, gotSetup, gotAction, err := sourceRemoveStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "FROM alpine\nCOPY --link src dst\n" {
+		t.Errorf("setup body = %q, want unchanged", gotSetup[0].Body)
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "docker build  ." {
+		t.Errorf("action body = %q, want %q", gotAction[0].Body, "docker build  .")
+	}
+}
+
+// TestRemoveKwargSetupScope proves the sibling remove_kwarg strategy
+// honours the same setup-scope routing — both names dispatch through
+// sourceRemoveStrategy, so the scope rule must work uniformly across them.
+func TestRemoveKwargSetupScope(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "code", Lang: "python", Body: "configure(name='x', cache=True, verbose=False)"},
+		},
+		Action: []runner.Step{
+			{Type: "code", Lang: "python", Body: "$RESULT = run()"},
+		},
+		Inputs: map[string]any{},
+	}
+	m := Mutation{
+		Strategy: "remove_kwarg",
+		Target:   "working_approach.setup.code",
+		Token:    "cache=True, ",
+	}
+	_, gotSetup, gotAction, err := sourceRemoveStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "configure(name='x', verbose=False)" {
+		t.Errorf("setup body = %q, want %q", gotSetup[0].Body, "configure(name='x', verbose=False)")
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "$RESULT = run()" {
+		t.Errorf("action body = %q, want unchanged", gotAction[0].Body)
+	}
+}
+
+// TestDropFlagSetupZeroMatchSurfaces proves the zero-match guard fires
+// against the correct slice once scope routing is in play: a setup-scoped
+// target whose token is absent from setup must surface
+// mutation_target_invalid even when the token happens to appear in the
+// action body (the historical scan would have falsely matched it there).
+func TestDropFlagSetupZeroMatchSurfaces(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\nCOPY src dst\n"},
+		},
+		Action: []runner.Step{
+			// Action contains --link, but scope routing must ignore it.
+			{Type: "shell", Body: "docker build --link ."},
+		},
+		Inputs: map[string]any{},
+	}
+	m := Mutation{
+		Strategy: "drop_flag",
+		Target:   "working_approach.setup.dockerfile",
+		Token:    "--link",
+	}
+	_, _, _, err := sourceRemoveStrategy{}.apply(baseline, m)
+	if err == nil {
+		t.Fatal("apply: expected zero-match error, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not appear anywhere") {
+		t.Errorf("error %q missing zero-match phrasing", err.Error())
+	}
+}
+
+// TestSourceSubstStrategySetupScope mirrors the drop_flag setup-scope test
+// for swap_function_call / swap_identifier: a setup-scoped target rewrites
+// b.Setup, the sibling slice is untouched. Future seeds may want to swap a
+// builder identifier inside a Dockerfile or shell setup — B20 makes that
+// path consistent across all source-modifying strategies.
+func TestSourceSubstStrategySetupScope(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\nRUN apk add curl\n"},
+		},
+		Action: []runner.Step{
+			{Type: "shell", Body: "echo hi"},
+		},
+		Inputs: map[string]any{},
+	}
+	m := Mutation{
+		Strategy: "swap_identifier",
+		Target:   "working_approach.setup.dockerfile",
+		Token:    "alpine",
+		NewValue: "debian",
+	}
+	_, gotSetup, gotAction, err := sourceSubstStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "FROM debian\nRUN apk add curl\n" {
+		t.Errorf("setup body = %q, want %q", gotSetup[0].Body, "FROM debian\nRUN apk add curl\n")
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "echo hi" {
+		t.Errorf("action body = %q, want unchanged", gotAction[0].Body)
+	}
+}
+
+// TestInputSubstStrategyPassesSetupThrough confirms inputSubstStrategy's
+// widened signature still returns b.Setup unchanged — its job is to rebind
+// an input, not perturb source.
+func TestInputSubstStrategyPassesSetupThrough(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\n"},
+		},
+		Action: []runner.Step{
+			{Type: "code", Lang: "python", Body: "$RESULT = $X"},
+		},
+		Inputs: map[string]any{"$X": 5},
+	}
+	m := Mutation{
+		Strategy: "set_literal_value",
+		Target:   "$X",
+		NewValue: 99,
+	}
+	gotInputs, gotSetup, gotAction, err := inputSubstStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if gotInputs["$X"] != 99 {
+		t.Errorf("inputs[$X] = %v, want 99", gotInputs["$X"])
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "FROM alpine\n" {
+		t.Errorf("setup body = %q, want unchanged", gotSetup[0].Body)
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "$RESULT = $X" {
+		t.Errorf("action body = %q, want unchanged", gotAction[0].Body)
+	}
+}
+
 func TestMutationRemoveKwargInvalidShape(t *testing.T) {
 	skipIfNoPython3(t)
 	// No token field, target is a branch path → resolveSwapToken errors.
@@ -1221,5 +1417,287 @@ func TestMutationInputSubstUnchangedDoesNotTriggerDiscriminationHint(t *testing.
 	}
 	if hasReason(res.Reasons, "mutation_did_not_discriminate") {
 		t.Fatalf("did_not_discriminate must not fire for input-substitution strategies: %v", res.Reasons)
+	}
+}
+
+// ── B21: action-discriminated mutate_fixture ──────────────────────────────
+//
+// These tests cover the new fixtureActionStrategy + resolveMutationStrategy
+// dispatcher. A mutate_fixture mutation with a non-empty action: field routes
+// to fixtureActionStrategy and performs the named action against the workdir-
+// materialized fixture directory; a mutate_fixture mutation without an action:
+// field continues to route through inputSubstStrategy (F82's sidecar enabled
+// flip path). See B21 in .hv/bugs/B21.md for the canonical failure case.
+
+// makeFixtureBaseline returns a branchBaseline with a workdir-materialized
+// fixture directory under <workdir>/<name>/ containing one seed file, and
+// inputs[$NAME] = "./<name>" — the same shape materializeDirectoryFixtures
+// produces during reexecute. Used by the fixtureActionStrategy unit tests
+// below to avoid spinning up a full reexecute pipeline.
+func makeFixtureBaseline(t *testing.T, name string) (branchBaseline, string) {
+	t.Helper()
+	workdir := t.TempDir()
+	fixtureDir := filepath.Join(workdir, name)
+	if err := os.MkdirAll(fixtureDir, 0o755); err != nil {
+		t.Fatalf("mkdir fixture: %v", err)
+	}
+	seedPath := filepath.Join(fixtureDir, "seed.txt")
+	if err := os.WriteFile(seedPath, []byte("seed contents\n"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	b := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "shell", Body: "echo setup"},
+		},
+		Action: []runner.Step{
+			{Type: "shell", Body: "ls ./" + name},
+		},
+		Inputs:  map[string]any{"$" + name: "./" + name},
+		Workdir: workdir,
+	}
+	return b, fixtureDir
+}
+
+// TestMutateFixtureActionAddNewFile covers the happy path: a mutate_fixture
+// mutation with action: add_new_file lands a new file in the workdir-
+// materialized fixture directory, leaves the seed file alone, and passes
+// inputs/setup/action through unchanged.
+func TestMutateFixtureActionAddNewFile(t *testing.T) {
+	baseline, fixtureDir := makeFixtureBaseline(t, "SOURCE_PATH")
+	originalSeed := filepath.Join(fixtureDir, "seed.txt")
+	originalSeedBefore, err := os.ReadFile(originalSeed)
+	if err != nil {
+		t.Fatalf("read seed before: %v", err)
+	}
+
+	m := Mutation{
+		Strategy:     "mutate_fixture",
+		Target:       "$SOURCE_PATH",
+		ActionLegacy: "add_new_file",
+	}
+	gotInputs, gotSetup, gotAction, err := fixtureActionStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+
+	// 1. A new file appeared in the fixture directory.
+	entries, err := os.ReadDir(fixtureDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 2 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("fixture dir should have 2 files (seed + added), got %d: %v", len(entries), names)
+	}
+	foundAdded := false
+	for _, e := range entries {
+		if e.Name() != "seed.txt" {
+			foundAdded = true
+			// Derived name must include "add_new_file" so a future
+			// reader can tell what mutated the tree.
+			if !strings.Contains(e.Name(), "add_new_file") {
+				t.Errorf("added filename %q should contain 'add_new_file' (derived from m.ActionLegacy)", e.Name())
+			}
+		}
+	}
+	if !foundAdded {
+		t.Fatal("no new file appeared in the fixture directory")
+	}
+
+	// 2. The original seed file is untouched.
+	originalSeedAfter, err := os.ReadFile(originalSeed)
+	if err != nil {
+		t.Fatalf("read seed after: %v", err)
+	}
+	if string(originalSeedBefore) != string(originalSeedAfter) {
+		t.Errorf("seed file body changed: before=%q after=%q", originalSeedBefore, originalSeedAfter)
+	}
+
+	// 3. Inputs/setup/action are passed through unchanged. The strategy
+	// operates on the on-disk tree, not the step bodies.
+	if gotInputs["$SOURCE_PATH"] != "./SOURCE_PATH" {
+		t.Errorf("inputs[$SOURCE_PATH] = %v, want unchanged ./SOURCE_PATH", gotInputs["$SOURCE_PATH"])
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "echo setup" {
+		t.Errorf("setup body changed: %v", gotSetup)
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "ls ./SOURCE_PATH" {
+		t.Errorf("action body changed: %v", gotAction)
+	}
+}
+
+// TestMutateFixtureRoutesByAction covers the dispatcher: the SAME
+// mutate_fixture strategy name routes to two different strategies based on
+// whether action: is empty. This is the core B21 contract.
+func TestMutateFixtureRoutesByAction(t *testing.T) {
+	// (a) Empty action + new_value → inputSubstStrategy (F82's path).
+	m1 := Mutation{
+		Strategy: "mutate_fixture",
+		Target:   "$FLAG",
+		NewValue: false,
+	}
+	strat1, ok := resolveMutationStrategy(m1)
+	if !ok {
+		t.Fatal("resolveMutationStrategy returned !ok for mutate_fixture without action")
+	}
+	if _, isInputSubst := strat1.(inputSubstStrategy); !isInputSubst {
+		t.Errorf("mutate_fixture without action routed to %T, want inputSubstStrategy", strat1)
+	}
+
+	// (b) Non-empty action → fixtureActionStrategy (B21's path).
+	m2 := Mutation{
+		Strategy:     "mutate_fixture",
+		Target:       "$SOURCE_PATH",
+		ActionLegacy: "add_new_file",
+	}
+	strat2, ok := resolveMutationStrategy(m2)
+	if !ok {
+		t.Fatal("resolveMutationStrategy returned !ok for mutate_fixture with action")
+	}
+	if _, isFixtureAction := strat2.(fixtureActionStrategy); !isFixtureAction {
+		t.Errorf("mutate_fixture with action routed to %T, want fixtureActionStrategy", strat2)
+	}
+
+	// (c) Whitespace-only action: routes as if empty (input-rebind path),
+	// matching mutationField's TrimSpace contract.
+	m3 := Mutation{
+		Strategy:     "mutate_fixture",
+		Target:       "$FLAG",
+		NewValue:     false,
+		ActionLegacy: "   ",
+	}
+	strat3, _ := resolveMutationStrategy(m3)
+	if _, isInputSubst := strat3.(inputSubstStrategy); !isInputSubst {
+		t.Errorf("mutate_fixture with whitespace-only action routed to %T, want inputSubstStrategy", strat3)
+	}
+}
+
+// TestMutateFixtureUnknownActionSurfaces covers the v0.1 scope guard: actions
+// not yet implemented surface a typed error rather than silently no-opping.
+// F89 will widen this when remove_file / flip_permission / etc. land.
+func TestMutateFixtureUnknownActionSurfaces(t *testing.T) {
+	baseline, _ := makeFixtureBaseline(t, "SOURCE_PATH")
+	m := Mutation{
+		Strategy:     "mutate_fixture",
+		Target:       "$SOURCE_PATH",
+		ActionLegacy: "delete_existing",
+	}
+	_, _, _, err := fixtureActionStrategy{}.apply(baseline, m)
+	if err == nil {
+		t.Fatal("apply: expected unsupported-action error, got nil")
+	}
+	if !strings.Contains(err.Error(), "is not supported") {
+		t.Errorf("error %q missing 'is not supported' phrasing", err.Error())
+	}
+	if !strings.Contains(err.Error(), "add_new_file") {
+		t.Errorf("error %q should name the supported action(s)", err.Error())
+	}
+}
+
+// TestMutateFixtureEmptyWorkdirSurfaces is a defensive guard: under normal
+// flow Workdir is mirrored from the SubprocessDriver in reexecute.go, but a
+// PythonDriver-tier baseline (or a hand-constructed test baseline) leaves
+// Workdir empty. The strategy must surface this with a clear error rather
+// than writing into the current working directory.
+func TestMutateFixtureEmptyWorkdirSurfaces(t *testing.T) {
+	baseline := branchBaseline{
+		Setup:  []runner.Step{{Type: "shell", Body: "true"}},
+		Action: []runner.Step{{Type: "shell", Body: "true"}},
+		Inputs: map[string]any{"$SOURCE_PATH": "./SOURCE_PATH"},
+		// Workdir intentionally empty.
+	}
+	m := Mutation{
+		Strategy:     "mutate_fixture",
+		Target:       "$SOURCE_PATH",
+		ActionLegacy: "add_new_file",
+	}
+	_, _, _, err := fixtureActionStrategy{}.apply(baseline, m)
+	if err == nil {
+		t.Fatal("apply: expected empty-workdir error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Workdir") {
+		t.Errorf("error %q should name the empty Workdir field", err.Error())
+	}
+}
+
+// TestMutateFixtureEmptyActionGuard is the defensive sibling: if a future
+// dispatch bug routes a mutate_fixture-without-action mutation to
+// fixtureActionStrategy, the apply method surfaces it rather than silently
+// writing a file. Belt-and-braces — resolveMutationStrategy should keep us
+// out of this branch in practice.
+func TestMutateFixtureEmptyActionGuard(t *testing.T) {
+	baseline, _ := makeFixtureBaseline(t, "SOURCE_PATH")
+	m := Mutation{
+		Strategy: "mutate_fixture",
+		Target:   "$SOURCE_PATH",
+		// ActionLegacy intentionally empty.
+	}
+	_, _, _, err := fixtureActionStrategy{}.apply(baseline, m)
+	if err == nil {
+		t.Fatal("apply: expected empty-action guard error, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty action") {
+		t.Errorf("error %q should mention 'empty action'", err.Error())
+	}
+}
+
+// TestMutateFixtureInputRebindPathRegression confirms the F82 sidecar-
+// enabled-flip path still works after B21: a mutate_fixture mutation with
+// no action: field continues to rebind the input through inputSubstStrategy.
+// If this test fails, B21 broke F82.
+func TestMutateFixtureInputRebindPathRegression(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "shell", Body: "true"},
+		},
+		Action: []runner.Step{
+			{Type: "shell", Body: "echo $FIXTURE_ENABLED"},
+		},
+		Inputs: map[string]any{"$FIXTURE_ENABLED": true},
+	}
+	m := Mutation{
+		Strategy: "mutate_fixture",
+		Target:   "$FIXTURE_ENABLED",
+		NewValue: false,
+		// ActionLegacy is empty → must route through inputSubstStrategy.
+	}
+	strat, ok := resolveMutationStrategy(m)
+	if !ok {
+		t.Fatal("resolveMutationStrategy returned !ok")
+	}
+	gotInputs, _, _, err := strat.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if gotInputs["$FIXTURE_ENABLED"] != false {
+		t.Errorf("inputs[$FIXTURE_ENABLED] = %v, want false (input-rebind path)", gotInputs["$FIXTURE_ENABLED"])
+	}
+}
+
+// TestMutateFixtureFilenameSanitization confirms the derived filename is
+// safe even when m.ActionLegacy contains characters that would otherwise
+// embed slashes or shell metacharacters in the filename. The seed validator
+// won't generally let pathological actions through, but defence-in-depth
+// matters here because we're writing to disk based on those strings.
+func TestMutateFixtureFilenameSanitization(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"add_new_file", "add_new_file"},
+		{"a/b", "a_b"},
+		{"a..b", "a__b"},
+		{"", "x"},
+		{"weird name!", "weird_name_"},
+		{"already-safe_123", "already-safe_123"},
+	}
+	for _, c := range cases {
+		got := sanitizeFixtureFilenamePart(c.in)
+		if got != c.want {
+			t.Errorf("sanitize(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

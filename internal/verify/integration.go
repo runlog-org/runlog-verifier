@@ -462,7 +462,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 	cassetteResponse := isCassetteResponseStrategy(m.Strategy)
 
 	if !cassetteResponse {
-		if _, ok := strategies[m.Strategy]; !ok {
+		if _, ok := resolveMutationStrategy(m); !ok {
 			return strategyUnsupportedReason(idx, m.Strategy), false
 		}
 	}
@@ -491,13 +491,15 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 		// Cassette-response mutations clone + perturb the cassette before
 		// the stub is created; everything else uses the un-mutated baseline.
 		var mutInputs map[string]any
+		var mutSetup []runner.Step
 		var mutAction []runner.Step
 		stubCassette := ctx.cassette
 
 		if cassetteResponse {
-			// Cassette-response: inputs and action are untouched; cassette
-			// is cloned + perturbed.
+			// Cassette-response: inputs, setup, and action are untouched;
+			// cassette is cloned + perturbed.
 			mutInputs = baseline.Inputs
+			mutSetup = baseline.Setup
 			mutAction = baseline.Action
 
 			perturbed, mutReason := applyCassetteResponseMutation(ctx.cassette, m, seq)
@@ -509,9 +511,15 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 			}
 			stubCassette = perturbed
 		} else {
-			strat := strategies[m.Strategy]
+			// resolveMutationStrategy routes mutate_fixture's
+			// action-discriminator shape to fixtureActionStrategy (B21)
+			// while preserving the static-registry path for everything
+			// else. The non-ok branch was already gated above before
+			// forEachMutationBranch fanned out, so the second-lookup ok
+			// here is guaranteed.
+			strat, _ := resolveMutationStrategy(m)
 			var err error
-			mutInputs, mutAction, err = strat.apply(baseline, m)
+			mutInputs, mutSetup, mutAction, err = strat.apply(baseline, m)
 			if err != nil {
 				return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 			}
@@ -520,7 +528,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 		stub := cassette.NewStub(stubCassette, seq)
 		mutInputs = withEndpoint(mutInputs, stub.URL())
 
-		got, err := runner.RunPython(baseline.Setup, mutAction, mutInputs, b.Timeout)
+		got, err := runner.RunPython(mutSetup, mutAction, mutInputs, b.Timeout)
 		stub.Close()
 
 		if err != nil {

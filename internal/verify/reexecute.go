@@ -480,20 +480,28 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	}
 
 	// ── Mutation testing ──────────────────────────────────────────────
+	// Workdir is mirrored from the per-branch SubprocessDriver so
+	// fixtureActionStrategy (B21) can write into the F94-materialized
+	// fixture directory without type-asserting through the Driver
+	// interface. The non-shared reexecute tier uses per-branch workdirs;
+	// the shared-state variant (F87 docker share-state) overrides this
+	// with the shared workdir below before mutations dispatch.
 	baseline := mutationBaseline{
 		Failed: branchBaseline{
-			Setup:  prep.FailedSetup,
-			Action: prep.FailedAction,
-			Inputs: prep.FailedInputs,
-			Result: failedRes,
-			Driver: failedDriver,
+			Setup:   prep.FailedSetup,
+			Action:  prep.FailedAction,
+			Inputs:  prep.FailedInputs,
+			Result:  failedRes,
+			Driver:  failedDriver,
+			Workdir: failedDriver.Workdir,
 		},
 		Working: branchBaseline{
-			Setup:  prep.WorkingSetup,
-			Action: prep.WorkingAction,
-			Inputs: prep.WorkingInputs,
-			Result: workingRes,
-			Driver: workingDriver,
+			Setup:   prep.WorkingSetup,
+			Action:  prep.WorkingAction,
+			Inputs:  prep.WorkingInputs,
+			Result:  workingRes,
+			Driver:  workingDriver,
+			Workdir: workingDriver.Workdir,
 		},
 		Diff:    e.Verification.Differential,
 		Timeout: timeout,
@@ -715,13 +723,13 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 				idx+1, m.Strategy),
 		}}, false
 	}
-	strat, ok := strategies[m.Strategy]
+	strat, ok := resolveMutationStrategy(m)
 	if !ok {
 		return strategyUnsupportedReason(idx, m.Strategy), false
 	}
 
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
-		mutInputs, mutAction, err := strat.apply(baseline, m)
+		mutInputs, mutSetup, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
 			return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 		}
@@ -735,7 +743,7 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 		return func() []Reason {
 			got, mutDriver, runReason, runErr := runReexecuteBranch(
 				fmt.Sprintf("mutation #%d (%s) on %s", idx+1, m.Strategy, branch),
-				cas, baseline.Setup, mutAction, mutInputs, b.Timeout)
+				cas, mutSetup, mutAction, mutInputs, b.Timeout)
 			defer cleanupReexecuteSandbox(mutDriver, cas, mutInputs, b.Timeout)
 
 			if runReason != nil {
@@ -798,13 +806,13 @@ func runOneReexecuteMutationShared(e *Entry, b mutationBaseline, m Mutation, idx
 				idx+1, m.Strategy),
 		}}, false
 	}
-	strat, ok := strategies[m.Strategy]
+	strat, ok := resolveMutationStrategy(m)
 	if !ok {
 		return strategyUnsupportedReason(idx, m.Strategy), false
 	}
 
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
-		mutInputs, mutAction, err := strat.apply(baseline, m)
+		mutInputs, mutSetup, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
 			return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 		}
@@ -816,7 +824,7 @@ func runOneReexecuteMutationShared(e *Entry, b mutationBaseline, m Mutation, idx
 		// end-of-runReexecute via the existing deferred
 		// cleanupReexecuteSandbox(failedDriver, ...) /
 		// cleanupReexecuteSandbox(workingDriver, ...).
-		got, runErr := baseline.Driver.Run(baseline.Setup, mutAction, mutInputs, b.Timeout)
+		got, runErr := baseline.Driver.Run(mutSetup, mutAction, mutInputs, b.Timeout)
 		if runErr != nil {
 			if isEnvErr(runErr) {
 				return []Reason{mutationRunnerErrorReason(idx, m, branch, runErr)}
