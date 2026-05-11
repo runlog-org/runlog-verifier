@@ -158,10 +158,10 @@ func (d SubprocessDriver) Run(setup, action []Step, inputs map[string]any, timeo
 	if err := validateInputs(inputs); err != nil {
 		return ExecResult{}, err
 	}
-	if err := d.validateSteps(setup); err != nil {
+	if err := d.validateSteps(setup, "setup"); err != nil {
 		return ExecResult{}, err
 	}
-	if err := d.validateSteps(action); err != nil {
+	if err := d.validateSteps(action, "action"); err != nil {
 		return ExecResult{}, err
 	}
 
@@ -172,7 +172,25 @@ func (d SubprocessDriver) Run(setup, action []Step, inputs map[string]any, timeo
 	// classify as outcomeFail or rejected. This mirrors how the Python driver
 	// surfaces a setup-step exception — captured into the same ExecResult shape
 	// the action would produce, not a Go-level error.
+	//
+	// type=dockerfile setup steps under tool=docker are materialized rather
+	// than executed: the substituted body is written to <workdir>/Dockerfile
+	// so a subsequent `docker build` (or the action step that wraps it) can
+	// pick it up from a stable, well-known path.
 	for i, s := range setup {
+		if s.Type == "dockerfile" && d.Tool == "docker" {
+			// Identity quote: Dockerfile bodies are file content, not shell
+			// args, so substituted values must NOT be single-quoted.
+			body := substituteVars(s.Body, merged, func(v string) string { return v })
+			if err := os.WriteFile(filepath.Join(d.Workdir, "Dockerfile"), []byte(body), 0644); err != nil {
+				return ExecResult{
+					Raised:    true,
+					Exception: "SubprocessError",
+					Message:   fmt.Sprintf("setup step %d (dockerfile): write failed: %v", i+1, err),
+				}, nil
+			}
+			continue
+		}
 		stdout, stderr, exit, err := d.execStep(s, merged, timeoutSec)
 		if err != nil {
 			return ExecResult{}, err
@@ -282,9 +300,29 @@ func (d SubprocessDriver) RunTeardownScript(lines []string, inputs map[string]an
 //	tool: shell  → lang must be "shell" (or empty, treated as shell)
 //	tool: sqlite → lang ∈ {"shell", "sql"} (empty defaults to shell)
 //
-// Step.Type must be empty or "code" (matching PythonDriver's accepted shape).
-func (d SubprocessDriver) validateSteps(steps []Step) error {
+// Step.Type must be empty or "code" (matching PythonDriver's accepted shape),
+// with one exception: under tool=docker, setup steps may also be type=dockerfile,
+// in which case the body is materialized to <workdir>/Dockerfile rather than
+// executed. type=dockerfile is NOT permitted in action steps — action is the
+// place a Dockerfile gets built or run from, not declared.
+//
+// section is "setup" or "action" and gates the type=dockerfile carve-out.
+func (d SubprocessDriver) validateSteps(steps []Step, section string) error {
 	for _, s := range steps {
+		// type=dockerfile setup steps under tool=docker are materialized,
+		// not executed: no lang check applies and we skip the rest of the
+		// per-step validation. Anywhere else, it's an error.
+		if s.Type == "dockerfile" {
+			if d.Tool != "docker" {
+				return fmt.Errorf("%w: type=dockerfile only supported under tool=docker, got tool=%q",
+					ErrSubprocessTool, d.Tool)
+			}
+			if section != "setup" {
+				return fmt.Errorf("%w: type=dockerfile is only valid in setup steps, not %s",
+					ErrSubprocessTool, section)
+			}
+			continue
+		}
 		if s.Type != "" && s.Type != "code" {
 			return fmt.Errorf("%w: step type %q (only \"code\" is supported)",
 				ErrLanguageUnsupported, s.Type)

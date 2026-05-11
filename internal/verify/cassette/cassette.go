@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +52,12 @@ type Cassette struct {
 	// has no runtime use for them yet).
 	SidecarFixtures []SidecarFixture
 
+	// Directory / docker_context fixtures, parsed in sorted-name order
+	// (same determinism story as SidecarFixtures). Materialized under the
+	// per-branch workdir before setup_script runs; inputs[Name] is bound
+	// to the workdir-relative subdir path.
+	DirectoryFixtures []DirectoryFixture
+
 	// Stable ordering of step keys so error messages are deterministic.
 	stepNames []string
 }
@@ -71,6 +78,22 @@ type SidecarFixture struct {
 	Enabled           bool // schema default true; we materialize the default at parse time
 	StopGraceSeconds  int  // schema default 5; materialize at parse time
 	ExposePID         bool
+}
+
+// DirectoryFixture is one parsed entry from cassette.fixtures with
+// kind: directory or kind: docker_context. Both kinds carry the same
+// file_tree shape (path-keyed map of relative paths → file body
+// strings); they're modelled as one Go type with Kind preserved for
+// downstream coupling (e.g. docker_context pairs with
+// context.kind: docker_container per the schema's pairing table).
+//
+// Files keys are workdir-relative paths interpreted at materialize
+// time; the materializer rejects absolute paths and any segment of
+// ".." to keep writes inside the per-branch sandbox.
+type DirectoryFixture struct {
+	Name  string            // the $FIXTURE_* token (key in cassette.fixtures)
+	Kind  string            // "directory" | "docker_context"
+	Files map[string]string // relative path → file body
 }
 
 // Runtime describes the host CLI a reexecute-mode cassette drives. tool is
@@ -146,6 +169,16 @@ func (c *Cassette) Clone() *Cassette {
 	out.SidecarFixtures = append([]SidecarFixture(nil), c.SidecarFixtures...)
 	for i := range out.SidecarFixtures {
 		out.SidecarFixtures[i].Command = append([]string(nil), c.SidecarFixtures[i].Command...)
+	}
+	out.DirectoryFixtures = append([]DirectoryFixture(nil), c.DirectoryFixtures...)
+	for i := range out.DirectoryFixtures {
+		if src := c.DirectoryFixtures[i].Files; src != nil {
+			dst := make(map[string]string, len(src))
+			for k, v := range src {
+				dst[k] = v
+			}
+			out.DirectoryFixtures[i].Files = dst
+		}
 	}
 	for name, step := range c.Steps {
 		out.Steps[name] = Step{
@@ -224,11 +257,12 @@ func Parse(raw map[string]any) (*Cassette, error) {
 		c.TeardownScript = teardown
 	}
 	if rawFixtures, ok := raw["fixtures"]; ok {
-		sf, err := parseFixtures(rawFixtures)
+		sf, df, err := parseFixtures(rawFixtures)
 		if err != nil {
 			return nil, err
 		}
 		c.SidecarFixtures = sf
+		c.DirectoryFixtures = df
 	}
 
 	// yaml.v3 preserves insertion order for map[string]any only when the map
@@ -431,8 +465,9 @@ func parseHeadersAndBody(s string) (lines []string, body string, err error) {
 }
 
 // parseFixtures decodes the cassette.fixtures map. The map is name-keyed
-// by $FIXTURE_* tokens; only `kind: sidecar_process` entries are returned
-// in declaration-order. Other kinds are skipped silently (the schema
+// by $FIXTURE_* tokens; `kind: sidecar_process`, `kind: directory`, and
+// `kind: docker_context` entries are returned in sorted-name order via
+// their respective slices. Other kinds are skipped silently (the schema
 // validates their shape; the verifier just has no runtime use for them).
 //
 // The map is iterated in sorted key order for determinism — yaml.v3
@@ -440,10 +475,10 @@ func parseHeadersAndBody(s string) (lines []string, body string, err error) {
 // declaration order is not recoverable. Sorted-name order is the
 // stable replacement; tests document this by using $FIXTURE_A,
 // $FIXTURE_B if order matters.
-func parseFixtures(raw any) ([]SidecarFixture, error) {
+func parseFixtures(raw any) ([]SidecarFixture, []DirectoryFixture, error) {
 	m, ok := raw.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("cassette.fixtures must be a mapping (got %T)", raw)
+		return nil, nil, fmt.Errorf("cassette.fixtures must be a mapping (got %T)", raw)
 	}
 	names := make([]string, 0, len(m))
 	for name := range m {
@@ -451,82 +486,172 @@ func parseFixtures(raw any) ([]SidecarFixture, error) {
 	}
 	sort.Strings(names)
 
-	out := make([]SidecarFixture, 0, len(names))
+	sidecars := make([]SidecarFixture, 0, len(names))
+	dirs := make([]DirectoryFixture, 0, len(names))
 	for _, name := range names {
 		entry, ok := m[name].(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("cassette.fixtures.%s must be a mapping (got %T)", name, m[name])
+			return nil, nil, fmt.Errorf("cassette.fixtures.%s must be a mapping (got %T)", name, m[name])
 		}
 		kind, _ := entry["kind"].(string)
-		if kind != "sidecar_process" {
+		switch kind {
+		case "sidecar_process":
+			sf, err := parseSidecarFixture(name, entry)
+			if err != nil {
+				return nil, nil, err
+			}
+			sidecars = append(sidecars, sf)
+		case "directory", "docker_context":
+			df, err := parseDirectoryFixture(name, kind, entry)
+			if err != nil {
+				return nil, nil, err
+			}
+			dirs = append(dirs, df)
+		default:
 			// schema covers the rest; runtime ignores them.
 			continue
 		}
-
-		sf := SidecarFixture{
-			Name:             name,
-			Enabled:          true, // schema default
-			StopGraceSeconds: 5,    // schema default
-		}
-
-		// Required: command (array of strings, length 1..64)
-		rawCmd, ok := entry["command"].([]any)
-		if !ok || len(rawCmd) == 0 {
-			return nil, fmt.Errorf("cassette.fixtures.%s.command must be a non-empty array of strings", name)
-		}
-		sf.Command = make([]string, len(rawCmd))
-		for i, c := range rawCmd {
-			s, ok := c.(string)
-			if !ok {
-				return nil, fmt.Errorf("cassette.fixtures.%s.command[%d] must be a string (got %T)", name, i, c)
-			}
-			sf.Command[i] = s
-		}
-
-		// Optional: against
-		if v, ok := entry["against"].(string); ok {
-			sf.Against = v
-		}
-
-		// Optional: ready_when (discriminated by property name)
-		if rw, ok := entry["ready_when"].(map[string]any); ok {
-			switch {
-			case len(rw) > 1:
-				return nil, fmt.Errorf("cassette.fixtures.%s.ready_when must declare exactly one of stderr_regex / path_exists / delay_seconds", name)
-			case rw["stderr_regex"] != nil:
-				if s, ok := rw["stderr_regex"].(string); ok {
-					sf.ReadyStderrRegex = s
-				}
-			case rw["path_exists"] != nil:
-				if s, ok := rw["path_exists"].(string); ok {
-					sf.ReadyPathExists = s
-				}
-			case rw["delay_seconds"] != nil:
-				switch v := rw["delay_seconds"].(type) {
-				case float64:
-					sf.ReadyDelaySeconds = v
-				case int:
-					sf.ReadyDelaySeconds = float64(v)
-				}
-			}
-		}
-
-		// Optional: enabled (default true)
-		if v, ok := entry["enabled"].(bool); ok {
-			sf.Enabled = v
-		}
-		// Optional: stop_grace_seconds (default 5)
-		if v, ok := entry["stop_grace_seconds"].(int); ok {
-			sf.StopGraceSeconds = v
-		}
-		// Optional: expose_pid (default false)
-		if v, ok := entry["expose_pid"].(bool); ok {
-			sf.ExposePID = v
-		}
-
-		out = append(out, sf)
 	}
-	return out, nil
+	return sidecars, dirs, nil
+}
+
+// parseSidecarFixture decodes one cassette.fixtures.<name> entry whose kind
+// is sidecar_process. Factored out of parseFixtures so the dispatcher stays
+// readable as more fixture kinds land.
+func parseSidecarFixture(name string, entry map[string]any) (SidecarFixture, error) {
+	sf := SidecarFixture{
+		Name:             name,
+		Enabled:          true, // schema default
+		StopGraceSeconds: 5,    // schema default
+	}
+
+	// Required: command (array of strings, length 1..64)
+	rawCmd, ok := entry["command"].([]any)
+	if !ok || len(rawCmd) == 0 {
+		return SidecarFixture{}, fmt.Errorf("cassette.fixtures.%s.command must be a non-empty array of strings", name)
+	}
+	sf.Command = make([]string, len(rawCmd))
+	for i, c := range rawCmd {
+		s, ok := c.(string)
+		if !ok {
+			return SidecarFixture{}, fmt.Errorf("cassette.fixtures.%s.command[%d] must be a string (got %T)", name, i, c)
+		}
+		sf.Command[i] = s
+	}
+
+	// Optional: against
+	if v, ok := entry["against"].(string); ok {
+		sf.Against = v
+	}
+
+	// Optional: ready_when (discriminated by property name)
+	if rw, ok := entry["ready_when"].(map[string]any); ok {
+		switch {
+		case len(rw) > 1:
+			return SidecarFixture{}, fmt.Errorf("cassette.fixtures.%s.ready_when must declare exactly one of stderr_regex / path_exists / delay_seconds", name)
+		case rw["stderr_regex"] != nil:
+			if s, ok := rw["stderr_regex"].(string); ok {
+				sf.ReadyStderrRegex = s
+			}
+		case rw["path_exists"] != nil:
+			if s, ok := rw["path_exists"].(string); ok {
+				sf.ReadyPathExists = s
+			}
+		case rw["delay_seconds"] != nil:
+			switch v := rw["delay_seconds"].(type) {
+			case float64:
+				sf.ReadyDelaySeconds = v
+			case int:
+				sf.ReadyDelaySeconds = float64(v)
+			}
+		}
+	}
+
+	// Optional: enabled (default true)
+	if v, ok := entry["enabled"].(bool); ok {
+		sf.Enabled = v
+	}
+	// Optional: stop_grace_seconds (default 5)
+	if v, ok := entry["stop_grace_seconds"].(int); ok {
+		sf.StopGraceSeconds = v
+	}
+	// Optional: expose_pid (default false)
+	if v, ok := entry["expose_pid"].(bool); ok {
+		sf.ExposePID = v
+	}
+
+	return sf, nil
+}
+
+// parseDirectoryFixture decodes one cassette.fixtures.<name> entry whose
+// kind is either "directory" or "docker_context". Both share the same
+// file_tree shape (path-keyed map of relative paths → file body
+// strings). Path keys are validated for sandbox safety here so the
+// materializer can trust them: empty paths, absolute paths, and any
+// path that would escape the workdir via ".." segments are rejected.
+func parseDirectoryFixture(name, kind string, entry map[string]any) (DirectoryFixture, error) {
+	rawFiles, ok := entry["files"]
+	if !ok {
+		return DirectoryFixture{}, fmt.Errorf("cassette.fixtures.%s.files must be a mapping (got %T)", name, entry["files"])
+	}
+	filesMap, ok := rawFiles.(map[string]any)
+	if !ok {
+		return DirectoryFixture{}, fmt.Errorf("cassette.fixtures.%s.files must be a mapping (got %T)", name, rawFiles)
+	}
+
+	// Sorted-path iteration mirrors the sorted-name iteration over
+	// fixtures: yaml.v3 loses map order through interface{}, so a
+	// stable consumer order is required for deterministic error
+	// messages and (downstream) deterministic disk-write order.
+	paths := make([]string, 0, len(filesMap))
+	for p := range filesMap {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	files := make(map[string]string, len(paths))
+	for _, p := range paths {
+		v := filesMap[p]
+		s, ok := v.(string)
+		if !ok {
+			return DirectoryFixture{}, fmt.Errorf("cassette.fixtures.%s.files[%q] must be a string (got %T)", name, p, v)
+		}
+		if err := validateFixturePath(name, p); err != nil {
+			return DirectoryFixture{}, err
+		}
+		files[p] = s
+	}
+
+	return DirectoryFixture{
+		Name:  name,
+		Kind:  kind,
+		Files: files,
+	}, nil
+}
+
+// validateFixturePath rejects paths that would let a hostile cassette
+// write outside the per-branch workdir. The check is intentionally
+// strict: empty paths, absolute paths, and any path whose cleaned form
+// has a leading ".." segment are rejected. Callers materializing the
+// file tree can then trust the keys are workdir-relative and stay
+// inside the sandbox.
+func validateFixturePath(name, p string) error {
+	if p == "" {
+		return fmt.Errorf("cassette.fixtures.%s.files contains unsafe path %q", name, p)
+	}
+	if strings.HasPrefix(p, "/") {
+		return fmt.Errorf("cassette.fixtures.%s.files contains unsafe path %q", name, p)
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return fmt.Errorf("cassette.fixtures.%s.files contains unsafe path %q", name, p)
+		}
+	}
+	cleaned := path.Clean(p)
+	if cleaned == ".." || strings.HasPrefix(cleaned+"/", "../") || strings.HasPrefix(cleaned, "/") {
+		return fmt.Errorf("cassette.fixtures.%s.files contains unsafe path %q", name, p)
+	}
+	return nil
 }
 
 // headersFromLines parses "Name: Value" lines into a canonicalized map.

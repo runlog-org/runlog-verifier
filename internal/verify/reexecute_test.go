@@ -632,3 +632,137 @@ func TestRunReexecuteShareStateRejectedForNonDocker(t *testing.T) {
 		t.Errorf("reason.Message should name the offending tool; got %q", res.Reasons[0].Message)
 	}
 }
+
+// TestMaterializeDirectoryFixtures_WritesAndBindsInputs is the focused
+// unit test for the F94 slice 2 helper. It avoids any external-tool
+// dependency by calling materializeDirectoryFixtures directly with a
+// constructed cassette + tmpdir + inputs map. Asserts:
+//
+//   - the declared file tree lands on disk under <workdir>/<NAME>/
+//     with parent directories created and file bodies intact;
+//   - inputs[$NAME] is bound to the workdir-relative subdir path
+//     ("./SOURCE_PATH") so subsequent setup_script / action steps see
+//     it after $-token substitution.
+func TestMaterializeDirectoryFixtures_WritesAndBindsInputs(t *testing.T) {
+	workdir := t.TempDir()
+	cas := &cassette.Cassette{
+		Mode:    "reexecute",
+		Runtime: &cassette.Runtime{Tool: "shell"},
+		DirectoryFixtures: []cassette.DirectoryFixture{
+			{
+				Name: "$SOURCE_PATH",
+				Kind: "directory",
+				Files: map[string]string{
+					"hello.txt":       "world",
+					"src/nested/x.go": "package nested",
+				},
+			},
+		},
+	}
+	var inputs map[string]any // intentionally nil — exercise the nil-guard.
+
+	reason := materializeDirectoryFixtures(cas, workdir, &inputs)
+	if reason != nil {
+		t.Fatalf("unexpected reason: %+v", reason)
+	}
+
+	// File bodies on disk.
+	body, err := os.ReadFile(filepath.Join(workdir, "SOURCE_PATH", "hello.txt"))
+	if err != nil {
+		t.Fatalf("read hello.txt: %v", err)
+	}
+	if string(body) != "world" {
+		t.Errorf("hello.txt body=%q, want world", body)
+	}
+	body, err = os.ReadFile(filepath.Join(workdir, "SOURCE_PATH", "src", "nested", "x.go"))
+	if err != nil {
+		t.Fatalf("read src/nested/x.go: %v", err)
+	}
+	if string(body) != "package nested" {
+		t.Errorf("nested body=%q, want %q", body, "package nested")
+	}
+
+	// inputs binding: workdir-relative path with leading "./".
+	if inputs == nil {
+		t.Fatalf("inputs still nil after materialize; nil-guard failed")
+	}
+	if got := inputs["$SOURCE_PATH"]; got != "./SOURCE_PATH" {
+		t.Errorf("inputs[$SOURCE_PATH]=%v, want ./SOURCE_PATH", got)
+	}
+}
+
+// TestReexecuteDirectoryFixtureEndToEnd is the integration sanity gate
+// for the F94 slice 2 lifecycle. A shell-tool cassette declares a
+// kind: directory fixture; the setup_script and action read the
+// materialized file via $SOURCE_PATH. Asserts verify.Run reports
+// status: "verified" — proves materialization happened before
+// setup_script, $SOURCE_PATH was bound in inputs, and the
+// workdir-relative path resolved correctly inside the per-branch
+// shell.
+func TestReexecuteDirectoryFixtureEndToEnd(t *testing.T) {
+	skipIfNoSh(t)
+	skipIfNoBinV(t, "cat")
+	skipIfNoBinV(t, "tr")
+
+	yaml := `unit_id: synthetic-directory-fixture-reexecute-smoke
+domain: ['shell']
+failed_approach:
+  description: cats the materialized file verbatim (lowercase content)
+  setup: []
+  action:
+    - type: code
+      lang: shell
+      body: |
+        cat $SOURCE_PATH/hello.txt
+  assertion:
+    type: value_equals
+    expect: fail
+working_approach:
+  description: cats then upper-cases the materialized file
+  setup: []
+  action:
+    - type: code
+      lang: shell
+      body: |
+        cat $SOURCE_PATH/hello.txt | tr a-z A-Z
+  assertion:
+    type: value_equals
+    expect: success
+verification:
+  type: integration
+  isolation: subprocess
+  cassette:
+    mode: reexecute
+    artifact: synthetic-directory.cassette.yaml
+    runtime:
+      tool: shell
+    fixtures:
+      $SOURCE_PATH:
+        kind: directory
+        files:
+          hello.txt: "world"
+  differential:
+    failed_branch_must_return:
+      type: string
+      value_equals: "world"
+    working_branch_must_return:
+      type: string
+      value_equals: "WORLD"
+  timeout_seconds: 10
+`
+
+	res, err := Run([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Defense in depth: any fixture_materialize_failed surfaces a
+	// hook-ordering or sandbox bug.
+	for _, r := range res.Reasons {
+		if strings.HasPrefix(r.Code, "fixture_") {
+			t.Fatalf("fixture-related rejection: code=%q msg=%q", r.Code, r.Message)
+		}
+	}
+	if res.Status != "verified" {
+		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}

@@ -73,6 +73,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -171,6 +172,68 @@ func stopSidecarFixtures(handles []*runner.SidecarHandle) {
 		}
 		_ = handles[i].Stop()
 	}
+}
+
+// materializeDirectoryFixtures writes each declared DirectoryFixture's file
+// tree under <workdir>/<NAME>/ and binds inputs[$NAME] to the workdir-relative
+// subdir path (e.g. "./SOURCE_PATH"). Runs BEFORE setup_script so the
+// script can reference $NAME and read the materialized files (e.g.
+// `cat $SOURCE_PATH/hello.txt`); sidecars start AFTER setup_script — the
+// two hooks must not be confused.
+//
+// Path safety: parse-time validation in cassette.parseDirectoryFixture
+// rejects empty / absolute / ".." paths, so by the time we get here the
+// keys can be trusted to stay inside the per-branch sandbox.
+//
+// inputsPtr is a pointer because we may need to lazily allocate the map
+// if the caller passed nil (matching the ephemeral-resource nil-guard
+// pattern). The caller observes the lazily-allocated map on return.
+func materializeDirectoryFixtures(cas *cassette.Cassette, workdir string, inputsPtr *map[string]any) *Reason {
+	if cas == nil || len(cas.DirectoryFixtures) == 0 {
+		return nil
+	}
+	if *inputsPtr == nil {
+		*inputsPtr = map[string]any{}
+	}
+	inputs := *inputsPtr
+	for _, df := range cas.DirectoryFixtures {
+		subdir := strings.TrimPrefix(df.Name, "$")
+		targetDir := filepath.Join(workdir, subdir)
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			return &Reason{
+				Code:    "fixture_materialize_failed",
+				Message: fmt.Sprintf("%s: %v", df.Name, err),
+			}
+		}
+		// Sorted-path order for deterministic disk-write order; mirrors
+		// parse-time sorted-name iteration.
+		paths := make([]string, 0, len(df.Files))
+		for p := range df.Files {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		for _, p := range paths {
+			full := filepath.Join(targetDir, p)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				return &Reason{
+					Code:    "fixture_materialize_failed",
+					Message: fmt.Sprintf("%s: %v", df.Name, err),
+				}
+			}
+			if err := os.WriteFile(full, []byte(df.Files[p]), 0o644); err != nil {
+				return &Reason{
+					Code:    "fixture_materialize_failed",
+					Message: fmt.Sprintf("%s: %v", df.Name, err),
+				}
+			}
+		}
+		// Workdir-relative subdir path. Setup/action steps run with cwd
+		// == workdir, so "./SOURCE_PATH" resolves to the materialized
+		// directory. `docker buildx build .` style commands can pass
+		// this directly as their build context.
+		inputs[df.Name] = "./" + subdir
+	}
+	return nil
 }
 
 // substituteSidecarArgv replaces any $-token argv element whose key is in
@@ -491,6 +554,19 @@ func runReexecuteBranch(branchName string, cas *cassette.Cassette, setup, action
 			inputs = map[string]any{}
 		}
 		inputs[urlKey] = branchURL
+	}
+
+	// Directory / docker_context fixtures: materialize each declared file
+	// tree under <workdir>/<NAME>/ and bind inputs[$NAME] to the
+	// workdir-relative subdir path. Runs BEFORE setup_script so the
+	// script can reference $NAME / cat into the materialized files;
+	// runs AFTER ephemeral-resource binding so the parse-time order
+	// of fixture parsing isn't load-bearing (and inputs[urlKey] is
+	// already in place if a tool needs both).
+	if dirReason := materializeDirectoryFixtures(cas, workdir, &inputs); dirReason != nil {
+		cleanupReexecuteSandbox(driver, cas, inputs, timeout)
+		dirReason.Message = fmt.Sprintf("%s: %s", branchName, dirReason.Message)
+		return runner.ExecResult{}, runner.SubprocessDriver{}, dirReason, nil
 	}
 
 	if err := driver.RunSetupScript(cas.SetupScript, inputs, timeout); err != nil {

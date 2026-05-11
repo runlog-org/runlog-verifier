@@ -430,3 +430,206 @@ func TestParseRuntimeShareStateNonBool(t *testing.T) {
 		t.Errorf("expected typed error, got: %v", err)
 	}
 }
+
+// TestParseFixtures_DirectoryKind covers the directory fixture arm of
+// parseFixtures. The arm is opt-in per kind (mirrors the sidecar_process
+// arm), so the test asserts the parsed slice surfaces both file entries
+// with their bodies intact and the Kind preserved for downstream coupling.
+func TestParseFixtures_DirectoryKind(t *testing.T) {
+	raw := map[string]any{
+		"mode":    "reexecute",
+		"runtime": map[string]any{"tool": "shell"},
+		"fixtures": map[string]any{
+			"$SOURCE_PATH": map[string]any{
+				"kind": "directory",
+				"files": map[string]any{
+					"src/main.go": "package main",
+					"Dockerfile":  "FROM alpine",
+				},
+			},
+		},
+	}
+	cas, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cas.DirectoryFixtures) != 1 {
+		t.Fatalf("DirectoryFixtures len=%d, want 1", len(cas.DirectoryFixtures))
+	}
+	df := cas.DirectoryFixtures[0]
+	if df.Name != "$SOURCE_PATH" {
+		t.Errorf("Name=%q, want $SOURCE_PATH", df.Name)
+	}
+	if df.Kind != "directory" {
+		t.Errorf("Kind=%q, want directory", df.Kind)
+	}
+	if got := df.Files["src/main.go"]; got != "package main" {
+		t.Errorf("Files[src/main.go]=%q, want %q", got, "package main")
+	}
+	if got := df.Files["Dockerfile"]; got != "FROM alpine" {
+		t.Errorf("Files[Dockerfile]=%q, want %q", got, "FROM alpine")
+	}
+}
+
+// TestParseFixtures_DockerContextKind covers the docker_context kind. The
+// schema models docker_context with the same file_tree shape as directory;
+// the Go model collapses them onto a single DirectoryFixture type with
+// Kind preserved so downstream code (context.kind: docker_container
+// pairing per the schema) can distinguish.
+func TestParseFixtures_DockerContextKind(t *testing.T) {
+	raw := map[string]any{
+		"mode":    "reexecute",
+		"runtime": map[string]any{"tool": "docker"},
+		"fixtures": map[string]any{
+			"$BUILD_CTX": map[string]any{
+				"kind": "docker_context",
+				"files": map[string]any{
+					"Dockerfile": "FROM alpine\nCMD [\"true\"]\n",
+				},
+			},
+		},
+	}
+	cas, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cas.DirectoryFixtures) != 1 {
+		t.Fatalf("DirectoryFixtures len=%d, want 1", len(cas.DirectoryFixtures))
+	}
+	df := cas.DirectoryFixtures[0]
+	if df.Kind != "docker_context" {
+		t.Errorf("Kind=%q, want docker_context", df.Kind)
+	}
+	if !strings.Contains(df.Files["Dockerfile"], "FROM alpine") {
+		t.Errorf("Files[Dockerfile]=%q, want FROM alpine prefix", df.Files["Dockerfile"])
+	}
+}
+
+// TestParseFixtures_DirectoryRejectsUnsafePath ensures a path containing
+// a ".." segment is rejected at parse time. The verifier materializes
+// these files under the per-branch workdir; an escape segment in a
+// hostile cassette would let it write outside the sandbox.
+func TestParseFixtures_DirectoryRejectsUnsafePath(t *testing.T) {
+	raw := map[string]any{
+		"mode":    "reexecute",
+		"runtime": map[string]any{"tool": "shell"},
+		"fixtures": map[string]any{
+			"$ESCAPE": map[string]any{
+				"kind": "directory",
+				"files": map[string]any{
+					"../escape": "x",
+				},
+			},
+		},
+	}
+	_, err := Parse(raw)
+	if err == nil {
+		t.Fatalf("expected parse error for ../escape path")
+	}
+	if !strings.Contains(err.Error(), "unsafe path") {
+		t.Errorf("err=%v, want error mentioning \"unsafe path\"", err)
+	}
+}
+
+// TestParseFixtures_DirectoryRejectsAbsolutePath covers the absolute-path
+// safety check. An absolute path key would let a cassette write outside
+// the workdir regardless of base; reject at parse time.
+func TestParseFixtures_DirectoryRejectsAbsolutePath(t *testing.T) {
+	raw := map[string]any{
+		"mode":    "reexecute",
+		"runtime": map[string]any{"tool": "shell"},
+		"fixtures": map[string]any{
+			"$ROOTED": map[string]any{
+				"kind": "directory",
+				"files": map[string]any{
+					"/etc/passwd": "x",
+				},
+			},
+		},
+	}
+	_, err := Parse(raw)
+	if err == nil {
+		t.Fatalf("expected parse error for absolute path")
+	}
+	if !strings.Contains(err.Error(), "unsafe path") {
+		t.Errorf("err=%v, want error mentioning \"unsafe path\"", err)
+	}
+}
+
+// TestParseFixtures_MixedFixtureKinds asserts the dispatcher routes each
+// supported kind to its own slice and silently drops unknown kinds. The
+// schema's tagged-union is wider than the Go model needs (per-kind
+// opt-in convention).
+func TestParseFixtures_MixedFixtureKinds(t *testing.T) {
+	raw := map[string]any{
+		"mode":    "reexecute",
+		"runtime": map[string]any{"tool": "shell"},
+		"fixtures": map[string]any{
+			"$SIDECAR": map[string]any{
+				"kind":    "sidecar_process",
+				"command": []any{"sh", "-c", "sleep 0.1"},
+			},
+			"$DIR": map[string]any{
+				"kind": "directory",
+				"files": map[string]any{
+					"hello.txt": "world",
+				},
+			},
+			"$UNKNOWN": map[string]any{
+				"kind": "sparse_file",
+				"size": 1024,
+			},
+		},
+	}
+	cas, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cas.SidecarFixtures) != 1 {
+		t.Errorf("SidecarFixtures len=%d, want 1", len(cas.SidecarFixtures))
+	}
+	if len(cas.DirectoryFixtures) != 1 {
+		t.Errorf("DirectoryFixtures len=%d, want 1", len(cas.DirectoryFixtures))
+	}
+	if cas.SidecarFixtures[0].Name != "$SIDECAR" {
+		t.Errorf("SidecarFixtures[0].Name=%q, want $SIDECAR", cas.SidecarFixtures[0].Name)
+	}
+	if cas.DirectoryFixtures[0].Name != "$DIR" {
+		t.Errorf("DirectoryFixtures[0].Name=%q, want $DIR", cas.DirectoryFixtures[0].Name)
+	}
+}
+
+// TestCassetteCloneDeepCopiesDirectoryFixtures covers the Clone deep-copy
+// for the new DirectoryFixtures slice. The integration-tier mutation
+// framework calls Clone before each cassette-response mutation, so a
+// shared Files map would corrupt the baseline cassette across mutations.
+func TestCassetteCloneDeepCopiesDirectoryFixtures(t *testing.T) {
+	raw := map[string]any{
+		"mode":    "reexecute",
+		"runtime": map[string]any{"tool": "shell"},
+		"fixtures": map[string]any{
+			"$DIR": map[string]any{
+				"kind": "directory",
+				"files": map[string]any{
+					"a.txt": "alpha",
+				},
+			},
+		},
+	}
+	orig, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	clone := orig.Clone()
+	if len(clone.DirectoryFixtures) != 1 {
+		t.Fatalf("clone.DirectoryFixtures len=%d, want 1", len(clone.DirectoryFixtures))
+	}
+	clone.DirectoryFixtures[0].Files["a.txt"] = "MUTATED"
+	clone.DirectoryFixtures[0].Files["new.txt"] = "added"
+	if orig.DirectoryFixtures[0].Files["a.txt"] != "alpha" {
+		t.Errorf("orig Files[a.txt]=%q, want alpha (clone mutation leaked)", orig.DirectoryFixtures[0].Files["a.txt"])
+	}
+	if _, present := orig.DirectoryFixtures[0].Files["new.txt"]; present {
+		t.Errorf("orig Files[new.txt] leaked from clone")
+	}
+}
