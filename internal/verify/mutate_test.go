@@ -3,6 +3,8 @@ package verify
 import (
 	"strings"
 	"testing"
+
+	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
 // mutationBaseYAML is a unit-tier entry where the working branch returns
@@ -669,6 +671,198 @@ func TestMutationDropFlag(t *testing.T) {
 	}
 	if res.Status != "verified" {
 		t.Fatalf("status=%q, want verified (reasons=%v)", res.Status, res.Reasons)
+	}
+}
+
+// TestDropFlagSetupScope covers B20: a drop_flag mutation whose target
+// names a setup-step type (`working_approach.setup.dockerfile`) must scan
+// and rewrite b.Setup, not b.Action. The token lives in the Dockerfile
+// body, so the historical action-only scan surfaced a zero-match
+// mutation_target_invalid even though the token was clearly present in
+// the setup body the target pointed at.
+func TestDropFlagSetupScope(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\nCOPY --link src dst\n"},
+		},
+		Action: []runner.Step{
+			{Type: "shell", Body: "echo hi"},
+		},
+		Inputs: map[string]any{"$X": 1},
+	}
+	m := Mutation{
+		Strategy: "drop_flag",
+		Target:   "working_approach.setup.dockerfile",
+		Token:    "--link",
+	}
+	gotInputs, gotSetup, gotAction, err := sourceRemoveStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "FROM alpine\nCOPY  src dst\n" {
+		t.Errorf("setup body = %q, want %q", gotSetup[0].Body, "FROM alpine\nCOPY  src dst\n")
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "echo hi" {
+		t.Errorf("action body = %q, want unchanged %q", gotAction[0].Body, "echo hi")
+	}
+	if gotInputs["$X"] != 1 {
+		t.Errorf("inputs[$X] = %v, want 1 (passthrough)", gotInputs["$X"])
+	}
+}
+
+// TestDropFlagActionScope covers the default scope: an action-prefixed
+// target (or any non-`*.setup.*` target) continues to scan b.Action — the
+// historical behaviour, preserved by mutationTargetScope's fallthrough.
+func TestDropFlagActionScope(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\nCOPY --link src dst\n"},
+		},
+		Action: []runner.Step{
+			{Type: "shell", Body: "docker build --no-cache ."},
+		},
+		Inputs: map[string]any{"$X": 1},
+	}
+	m := Mutation{
+		Strategy: "drop_flag",
+		Target:   "working_approach.action.shell",
+		Token:    "--no-cache",
+	}
+	_, gotSetup, gotAction, err := sourceRemoveStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "FROM alpine\nCOPY --link src dst\n" {
+		t.Errorf("setup body = %q, want unchanged", gotSetup[0].Body)
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "docker build  ." {
+		t.Errorf("action body = %q, want %q", gotAction[0].Body, "docker build  .")
+	}
+}
+
+// TestRemoveKwargSetupScope proves the sibling remove_kwarg strategy
+// honours the same setup-scope routing — both names dispatch through
+// sourceRemoveStrategy, so the scope rule must work uniformly across them.
+func TestRemoveKwargSetupScope(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "code", Lang: "python", Body: "configure(name='x', cache=True, verbose=False)"},
+		},
+		Action: []runner.Step{
+			{Type: "code", Lang: "python", Body: "$RESULT = run()"},
+		},
+		Inputs: map[string]any{},
+	}
+	m := Mutation{
+		Strategy: "remove_kwarg",
+		Target:   "working_approach.setup.code",
+		Token:    "cache=True, ",
+	}
+	_, gotSetup, gotAction, err := sourceRemoveStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "configure(name='x', verbose=False)" {
+		t.Errorf("setup body = %q, want %q", gotSetup[0].Body, "configure(name='x', verbose=False)")
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "$RESULT = run()" {
+		t.Errorf("action body = %q, want unchanged", gotAction[0].Body)
+	}
+}
+
+// TestDropFlagSetupZeroMatchSurfaces proves the zero-match guard fires
+// against the correct slice once scope routing is in play: a setup-scoped
+// target whose token is absent from setup must surface
+// mutation_target_invalid even when the token happens to appear in the
+// action body (the historical scan would have falsely matched it there).
+func TestDropFlagSetupZeroMatchSurfaces(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\nCOPY src dst\n"},
+		},
+		Action: []runner.Step{
+			// Action contains --link, but scope routing must ignore it.
+			{Type: "shell", Body: "docker build --link ."},
+		},
+		Inputs: map[string]any{},
+	}
+	m := Mutation{
+		Strategy: "drop_flag",
+		Target:   "working_approach.setup.dockerfile",
+		Token:    "--link",
+	}
+	_, _, _, err := sourceRemoveStrategy{}.apply(baseline, m)
+	if err == nil {
+		t.Fatal("apply: expected zero-match error, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not appear anywhere") {
+		t.Errorf("error %q missing zero-match phrasing", err.Error())
+	}
+}
+
+// TestSourceSubstStrategySetupScope mirrors the drop_flag setup-scope test
+// for swap_function_call / swap_identifier: a setup-scoped target rewrites
+// b.Setup, the sibling slice is untouched. Future seeds may want to swap a
+// builder identifier inside a Dockerfile or shell setup — B20 makes that
+// path consistent across all source-modifying strategies.
+func TestSourceSubstStrategySetupScope(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\nRUN apk add curl\n"},
+		},
+		Action: []runner.Step{
+			{Type: "shell", Body: "echo hi"},
+		},
+		Inputs: map[string]any{},
+	}
+	m := Mutation{
+		Strategy: "swap_identifier",
+		Target:   "working_approach.setup.dockerfile",
+		Token:    "alpine",
+		NewValue: "debian",
+	}
+	_, gotSetup, gotAction, err := sourceSubstStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "FROM debian\nRUN apk add curl\n" {
+		t.Errorf("setup body = %q, want %q", gotSetup[0].Body, "FROM debian\nRUN apk add curl\n")
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "echo hi" {
+		t.Errorf("action body = %q, want unchanged", gotAction[0].Body)
+	}
+}
+
+// TestInputSubstStrategyPassesSetupThrough confirms inputSubstStrategy's
+// widened signature still returns b.Setup unchanged — its job is to rebind
+// an input, not perturb source.
+func TestInputSubstStrategyPassesSetupThrough(t *testing.T) {
+	baseline := branchBaseline{
+		Setup: []runner.Step{
+			{Type: "dockerfile", Body: "FROM alpine\n"},
+		},
+		Action: []runner.Step{
+			{Type: "code", Lang: "python", Body: "$RESULT = $X"},
+		},
+		Inputs: map[string]any{"$X": 5},
+	}
+	m := Mutation{
+		Strategy: "set_literal_value",
+		Target:   "$X",
+		NewValue: 99,
+	}
+	gotInputs, gotSetup, gotAction, err := inputSubstStrategy{}.apply(baseline, m)
+	if err != nil {
+		t.Fatalf("apply: unexpected error %v", err)
+	}
+	if gotInputs["$X"] != 99 {
+		t.Errorf("inputs[$X] = %v, want 99", gotInputs["$X"])
+	}
+	if len(gotSetup) != 1 || gotSetup[0].Body != "FROM alpine\n" {
+		t.Errorf("setup body = %q, want unchanged", gotSetup[0].Body)
+	}
+	if len(gotAction) != 1 || gotAction[0].Body != "$RESULT = $X" {
+		t.Errorf("action body = %q, want unchanged", gotAction[0].Body)
 	}
 }
 

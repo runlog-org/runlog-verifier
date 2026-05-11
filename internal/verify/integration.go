@@ -491,13 +491,15 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 		// Cassette-response mutations clone + perturb the cassette before
 		// the stub is created; everything else uses the un-mutated baseline.
 		var mutInputs map[string]any
+		var mutSetup []runner.Step
 		var mutAction []runner.Step
 		stubCassette := ctx.cassette
 
 		if cassetteResponse {
-			// Cassette-response: inputs and action are untouched; cassette
-			// is cloned + perturbed.
+			// Cassette-response: inputs, setup, and action are untouched;
+			// cassette is cloned + perturbed.
 			mutInputs = baseline.Inputs
+			mutSetup = baseline.Setup
 			mutAction = baseline.Action
 
 			perturbed, mutReason := applyCassetteResponseMutation(ctx.cassette, m, seq)
@@ -511,7 +513,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 		} else {
 			strat := strategies[m.Strategy]
 			var err error
-			mutInputs, mutAction, err = strat.apply(baseline, m)
+			mutInputs, mutSetup, mutAction, err = strat.apply(baseline, m)
 			if err != nil {
 				return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 			}
@@ -520,7 +522,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 		stub := cassette.NewStub(stubCassette, seq)
 		mutInputs = withEndpoint(mutInputs, stub.URL())
 
-		got, err := runner.RunPython(baseline.Setup, mutAction, mutInputs, b.Timeout)
+		got, err := runner.RunPython(mutSetup, mutAction, mutInputs, b.Timeout)
 		stub.Close()
 
 		if err != nil {

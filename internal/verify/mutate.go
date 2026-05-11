@@ -135,48 +135,100 @@ const (
 )
 
 // strategy applies one mutation to a per-branch baseline and returns the
-// mutated inputs and action that should be re-run. The baseline is read-only;
-// implementations MUST NOT mutate b.Inputs or b.Action — they return fresh
-// maps/slices so the caller can re-run baseline branches independently.
+// mutated inputs, setup, and action that should be re-run. The baseline is
+// read-only; implementations MUST NOT mutate b.Inputs, b.Setup, or b.Action —
+// they return fresh maps/slices so the caller can re-run baseline branches
+// independently.
+//
+// B20 widened the return tuple from (inputs, action) to (inputs, setup,
+// action) so source-modifying strategies (sourceSubstStrategy,
+// sourceRemoveStrategy) can route a mutation at the setup steps when the
+// target string explicitly names that scope (e.g.
+// `working_approach.setup.dockerfile`). Strategies that don't perturb source
+// (inputSubstStrategy) return b.Setup unchanged; strategies that operate on
+// a single source slice mutate the targeted slice and pass the sibling
+// through unchanged. See mutationTargetScope for the scope-detection rule.
 type strategy interface {
-	apply(b branchBaseline, m Mutation) (mutInputs map[string]any, mutAction []runner.Step, err error)
+	apply(b branchBaseline, m Mutation) (mutInputs map[string]any, mutSetup []runner.Step, mutAction []runner.Step, err error)
+}
+
+// mutationTargetScope reports which step slice a source-mutating strategy
+// should scan and rewrite for this mutation.
+//   - "setup":  target has prefix "<branch>.setup.<type>"
+//   - "action": target has prefix "<branch>.action.<type>", or no prefix at
+//     all (action is the conventional default scope).
+//
+// Used by source-mutating strategies (sourceSubstStrategy,
+// sourceRemoveStrategy) to decide which step slice to scan and mutate.
+//
+// Per B20: canonical seeds declare drop_flag targets like
+// "working_approach.setup.dockerfile" — the token to drop lives in
+// the setup-step body, not the action. Returning "setup" routes the
+// mutation to b.Setup; "action" preserves the historical default
+// (no-prefix and action-prefixed targets continue to scan b.Action).
+func mutationTargetScope(target string) string {
+	if strings.HasPrefix(target, "failed_approach.setup.") ||
+		strings.HasPrefix(target, "working_approach.setup.") {
+		return "setup"
+	}
+	return "action"
 }
 
 // inputSubstStrategy covers set_literal_value and mutate_fixture: the
 // mutation rebinds a $-prefixed input key to a new value.
 type inputSubstStrategy struct{}
 
-func (inputSubstStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, error) {
+func (inputSubstStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, []runner.Step, error) {
 	inputs, err := applyInputSubstitution(b.Inputs, m.Target, m.NewValue)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return inputs, b.Action, nil
+	return inputs, b.Setup, b.Action, nil
 }
 
 // sourceSubstStrategy covers swap_function_call and swap_identifier: the
-// mutation rewrites a token in the action source via word-boundary
-// substitution.
+// mutation rewrites a token in either the setup or action source via
+// word-boundary substitution. Scope is decided by mutationTargetScope —
+// targets like "working_approach.setup.<type>" rewrite the setup body;
+// everything else continues to rewrite the action body.
 type sourceSubstStrategy struct{}
 
-func (sourceSubstStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, error) {
+func (sourceSubstStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, []runner.Step, error) {
+	if mutationTargetScope(m.Target) == "setup" {
+		setup, err := applySourceMutation(b.Setup, m)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return b.Inputs, setup, b.Action, nil
+	}
 	action, err := applySourceMutation(b.Action, m)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return b.Inputs, action, nil
+	return b.Inputs, b.Setup, action, nil
 }
 
 // sourceRemoveStrategy covers remove_kwarg and drop_flag: the mutation
-// strips every occurrence of a token from the action source.
+// strips every occurrence of a token from either the setup or action source.
+// Scope is decided by mutationTargetScope — targets like
+// "working_approach.setup.<type>" strip from the setup body (B20's canonical
+// failure case: Dockerfile-level `--link` drop); everything else continues
+// to strip from the action body.
 type sourceRemoveStrategy struct{}
 
-func (sourceRemoveStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, error) {
+func (sourceRemoveStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, []runner.Step, error) {
+	if mutationTargetScope(m.Target) == "setup" {
+		setup, err := applyRemoveMutation(b.Setup, m)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return b.Inputs, setup, b.Action, nil
+	}
 	action, err := applyRemoveMutation(b.Action, m)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return b.Inputs, action, nil
+	return b.Inputs, b.Setup, action, nil
 }
 
 // strategies is the single source of truth for which strategy names this
@@ -492,7 +544,7 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 	}
 
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
-		mutInputs, mutAction, err := strat.apply(baseline, m)
+		mutInputs, mutSetup, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
 			return []Reason{mutationTargetInvalidReason(idx, m, branch, err)}
 		}
@@ -505,7 +557,7 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 		if drv == nil {
 			drv = runner.PythonDriver{}
 		}
-		got, err := drv.Run(baseline.Setup, mutAction, mutInputs, b.Timeout)
+		got, err := drv.Run(mutSetup, mutAction, mutInputs, b.Timeout)
 		if err != nil {
 			if isEnvErr(err) {
 				return []Reason{mutationRunnerErrorReason(idx, m, branch, err)}
