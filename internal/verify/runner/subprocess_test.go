@@ -506,3 +506,108 @@ func TestRedactStderrTruncates(t *testing.T) {
 		t.Errorf("redactStderr did not bound output: len=%d", len(out))
 	}
 }
+
+// TestSubprocessDriver_DockerfileSetupStep_Materializes pins the F94 slice-1
+// contract: a type=dockerfile setup step under tool=docker writes the body
+// verbatim to <workdir>/Dockerfile rather than executing it, and the action
+// step continues normally afterwards.
+func TestSubprocessDriver_DockerfileSetupStep_Materializes(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	dir := newSandbox(t)
+	d := SubprocessDriver{Tool: "docker", Workdir: dir}
+	body := "FROM alpine:3\nRUN echo hi\n"
+	res, err := d.Run(
+		[]Step{{Type: "dockerfile", Body: body}},
+		[]Step{{Type: "code", Lang: "shell", Body: "echo done"}},
+		nil,
+		10,
+	)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("raised: %s: %s", res.Exception, res.Message)
+	}
+	if res.Repr != "done\n" {
+		t.Fatalf("repr=%q, want %q", res.Repr, "done\n")
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "Dockerfile"))
+	if err != nil {
+		t.Fatalf("ReadFile(Dockerfile): %v", err)
+	}
+	if string(got) != body {
+		t.Fatalf("Dockerfile content=%q, want %q", string(got), body)
+	}
+}
+
+// TestSubprocessDriver_DockerfileSetupStep_SubstitutesVars pins that input
+// $-tokens are substituted into the Dockerfile body, and that substitution
+// uses an identity quote (no shell-quoting / single-quote wrapping) — the
+// body becomes a file, not a sh -c argument.
+func TestSubprocessDriver_DockerfileSetupStep_SubstitutesVars(t *testing.T) {
+	skipIfNoBin(t, "sh")
+	dir := newSandbox(t)
+	d := SubprocessDriver{Tool: "docker", Workdir: dir}
+	res, err := d.Run(
+		[]Step{{Type: "dockerfile", Body: "FROM $BASE_IMAGE\nCOPY $SOURCE_PATH /app\n"}},
+		[]Step{{Type: "code", Lang: "shell", Body: "true"}},
+		map[string]any{"$BASE_IMAGE": "debian:12", "$SOURCE_PATH": "./src"},
+		10,
+	)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Raised {
+		t.Fatalf("raised: %s: %s", res.Exception, res.Message)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "Dockerfile"))
+	if err != nil {
+		t.Fatalf("ReadFile(Dockerfile): %v", err)
+	}
+	want := "FROM debian:12\nCOPY ./src /app\n"
+	if string(got) != want {
+		t.Fatalf("Dockerfile content=%q, want %q (must NOT be shell-quoted)", string(got), want)
+	}
+}
+
+// TestSubprocessDriver_DockerfileSetupStep_RejectsUnderNonDockerTool pins that
+// type=dockerfile is a tool=docker-only carve-out; under any other tool it
+// must surface as ErrSubprocessTool with a message naming the constraint.
+func TestSubprocessDriver_DockerfileSetupStep_RejectsUnderNonDockerTool(t *testing.T) {
+	d := SubprocessDriver{Tool: "sqlite", Workdir: newSandbox(t)}
+	_, err := d.Run(
+		[]Step{{Type: "dockerfile", Body: "FROM alpine:3"}},
+		[]Step{{Type: "code", Lang: "sql", Body: "SELECT 1"}},
+		nil,
+		5,
+	)
+	if !errors.Is(err, ErrSubprocessTool) {
+		t.Fatalf("expected ErrSubprocessTool, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "type=dockerfile only supported under tool=docker") {
+		t.Fatalf("err message=%q, want substring 'type=dockerfile only supported under tool=docker'", err.Error())
+	}
+}
+
+// TestSubprocessDriver_DockerfileSetupStep_RejectsInActionSteps pins that
+// type=dockerfile is setup-only. Action steps that declare a dockerfile must
+// be rejected at validation rather than falling through to execStep, which
+// would produce a confusing lang-not-found error.
+func TestSubprocessDriver_DockerfileSetupStep_RejectsInActionSteps(t *testing.T) {
+	d := SubprocessDriver{Tool: "docker", Workdir: newSandbox(t)}
+	_, err := d.Run(
+		nil,
+		[]Step{{Type: "dockerfile", Body: "FROM alpine:3"}},
+		nil,
+		5,
+	)
+	if err == nil {
+		t.Fatalf("expected validation error for type=dockerfile in action steps")
+	}
+	if !errors.Is(err, ErrSubprocessTool) {
+		t.Fatalf("err=%v, want wrapping ErrSubprocessTool", err)
+	}
+	if !strings.Contains(err.Error(), "action") {
+		t.Fatalf("err message=%q, want substring 'action'", err.Error())
+	}
+}
