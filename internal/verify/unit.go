@@ -387,7 +387,7 @@ func runOneUnitSubprocessMutation(b mutationBaseline, m Mutation, idx int, tool 
 				idx+1, m.Strategy),
 		}}, false
 	}
-	strat, ok := strategies[m.Strategy]
+	strat, ok := resolveMutationStrategy(m)
 	if !ok {
 		return strategyUnsupportedReason(idx, m.Strategy), false
 	}

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -93,12 +95,19 @@ func (k branchKind) collectionPropertyKey() string {
 // constructs a fresh per-mutation Driver pointing at a fresh per-mutation
 // tmpdir for actual mutation re-runs (per-mutation sandbox isolation
 // invariant, mirrors F19's per-mutation stub).
+//
+// Workdir mirrors the SubprocessDriver's Workdir for the reexecute tier so
+// fixtureActionStrategy (B21) can write into the F94-materialized fixture
+// directory without type-asserting through the Driver interface. Empty
+// when the baseline's driver doesn't own a workdir (PythonDriver replay
+// tiers, unit tier).
 type branchBaseline struct {
-	Setup  []runner.Step
-	Action []runner.Step
-	Inputs map[string]any
-	Result runner.ExecResult
-	Driver runner.Driver
+	Setup   []runner.Step
+	Action  []runner.Step
+	Inputs  map[string]any
+	Result  runner.ExecResult
+	Driver  runner.Driver
+	Workdir string
 }
 
 // mutationBaseline pairs the per-branch baselines for a unit/function run with
@@ -231,6 +240,108 @@ func (sourceRemoveStrategy) apply(b branchBaseline, m Mutation) (map[string]any,
 	return b.Inputs, b.Setup, action, nil
 }
 
+// fixtureActionStrategy performs an in-place action against the workdir-
+// materialized fixture directory between baseline and the per-mutation re-
+// run. Routed by mutate_fixture when the mutation declares an "action:"
+// discriminator (e.g. action: add_new_file); the input-rebind path
+// remains for mutate_fixture mutations with new_value (F82's sidecar
+// enabled flip).
+//
+// Per B21: canonical seeds like docker-buildkit-copy-link-cache declare
+// mutate_fixture mutations with action: add_new_file (no new_value) — the
+// semantic is "add a file to the $SOURCE_PATH directory between the
+// baseline build and the per-mutation re-run", which exercises the
+// cache-discrimination differential (a working-approach build invalidates
+// its cache when a source file changes; a broken-approach build still
+// reuses a stale cache). Implementing this in the strategy layer (not
+// inputSubstStrategy) keeps each strategy's responsibility crisp.
+//
+// The action is performed at apply time — strat.apply runs after the
+// baseline branch executed and before the per-mutation re-run, so the
+// directory exists on disk (the F94 materializer wrote it before
+// setup_script). The new file lands under <workdir>/<NAME>/ where NAME
+// is m.Target with the leading "$" stripped, matching
+// materializeDirectoryFixtures' on-disk layout.
+//
+// Inputs are passed through unchanged (the input still points at
+// "./<NAME>"); setup and action are passed through unchanged (the
+// fixture mutation operates on the on-disk tree, not the step bodies).
+//
+// Scope (v0.1): only mutate_fixture's action: add_new_file is supported.
+// Additional actions (remove_file, flip_permission, etc.) belong to F89's
+// broader generalisation of fixture-mutation strategies beyond input-rebind.
+type fixtureActionStrategy struct{}
+
+func (fixtureActionStrategy) apply(b branchBaseline, m Mutation) (map[string]any, []runner.Step, []runner.Step, error) {
+	// The fixture's on-disk path under the baseline workdir. inputs[m.Target]
+	// was bound to "./<NAME>" by materializeDirectoryFixtures; the
+	// workdir-relative path resolves to <workdir>/<NAME>/. branchBaseline's
+	// Workdir mirrors the SubprocessDriver's Workdir so we don't have to
+	// type-assert through the Driver interface (and unit-tier baselines
+	// that aren't subprocess-driven will surface a clear error rather than
+	// silently writing into the wrong place).
+	if b.Workdir == "" {
+		return nil, nil, nil, fmt.Errorf("fixture mutation needs a workdir-bound baseline; got empty Workdir (strategy %s is only valid at reexecute tier with a materialized directory fixture)", m.Strategy)
+	}
+	if m.Target == "" {
+		return nil, nil, nil, fmt.Errorf("fixture action %q needs a $-prefixed target naming the materialized fixture directory", m.ActionLegacy)
+	}
+	fixtureName := strings.TrimPrefix(m.Target, "$")
+	fixtureDir := filepath.Join(b.Workdir, fixtureName)
+
+	action := m.ActionLegacy
+	switch action {
+	case "add_new_file":
+		// Filename derived from static mutation fields with sanitisation —
+		// no seed-author input is interpolated raw. Collision case (two
+		// add_new_file mutations against the same target within one branch)
+		// is a seed-authoring pathology that will produce a deterministic
+		// "file exists" overwrite; we don't try to guard against it because
+		// the seed validator will catch the duplicate-mutation shape upstream.
+		newName := fmt.Sprintf("runlog_%s_%s_%s.txt",
+			sanitizeFixtureFilenamePart(m.Strategy),
+			sanitizeFixtureFilenamePart(fixtureName),
+			sanitizeFixtureFilenamePart(action))
+		newPath := filepath.Join(fixtureDir, newName)
+		if err := os.WriteFile(newPath, []byte("runlog mutate_fixture add_new_file\n"), 0o644); err != nil {
+			return nil, nil, nil, fmt.Errorf("mutate_fixture add_new_file: write %q: %w", newPath, err)
+		}
+	case "":
+		// No action field — caller should have routed through
+		// inputSubstStrategy instead. Defensive guard so a future dispatch
+		// bug surfaces clearly rather than silently writing a confused file.
+		return nil, nil, nil, fmt.Errorf("fixtureActionStrategy invoked with empty action field — route mutate_fixture without action through inputSubstStrategy instead")
+	default:
+		return nil, nil, nil, fmt.Errorf("mutate_fixture action %q is not supported (v0.1 supports: add_new_file)", action)
+	}
+	return b.Inputs, b.Setup, b.Action, nil
+}
+
+// sanitizeFixtureFilenamePart rewrites a string to a portable-filename
+// alphabet so derived names land safely on every host filesystem regardless
+// of what the seed author wrote in m.Strategy / m.Target / m.ActionLegacy.
+// Allowed characters: [A-Za-z0-9_-]; everything else becomes "_". Empty
+// inputs are replaced with "x" to keep the derived name well-formed.
+func sanitizeFixtureFilenamePart(s string) string {
+	if s == "" {
+		return "x"
+	}
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z',
+			c >= 'a' && c <= 'z',
+			c >= '0' && c <= '9',
+			c == '_', c == '-':
+			out = append(out, c)
+		default:
+			out = append(out, '_')
+		}
+	}
+	return string(out)
+}
+
 // strategies is the single source of truth for which strategy names this
 // verifier slice supports. Adding a new strategy is a one-line registry edit
 // plus one apply method.
@@ -240,6 +351,14 @@ func (sourceRemoveStrategy) apply(b branchBaseline, m Mutation) (map[string]any,
 // (inputs, action) -> (inputs, action) shape this strategy interface assumes.
 // They live in cassetteResponseStrategies below so the registry isn't lying
 // about supporting them at unit tier.
+//
+// B21: mutate_fixture has TWO valid shapes — the static registry routes the
+// input-rebind shape (mutate_fixture with new_value, F82's sidecar enabled
+// flip) through inputSubstStrategy. The action-discriminated shape
+// (mutate_fixture with action:) routes through fixtureActionStrategy via
+// resolveMutationStrategy's dynamic dispatch below; the registry stays
+// single-keyed so the supported-strategies error message and the
+// unsupported-strategy gate continue to read cleanly.
 var strategies = map[string]strategy{
 	"set_literal_value":  inputSubstStrategy{},
 	"mutate_fixture":     inputSubstStrategy{},
@@ -247,6 +366,24 @@ var strategies = map[string]strategy{
 	"swap_identifier":    sourceSubstStrategy{},
 	"remove_kwarg":       sourceRemoveStrategy{},
 	"drop_flag":          sourceRemoveStrategy{},
+}
+
+// resolveMutationStrategy returns the strategy that should handle a
+// mutation, after applying any dynamic dispatch based on the mutation's
+// shape. The static registry handles the common case; mutate_fixture
+// with a non-empty action: field routes to fixtureActionStrategy per
+// B21.
+//
+// Centralised so every tier's per-mutation dispatcher (unit, integration
+// replay, integration reexecute share/non-share) routes identically — the
+// action-discriminator dispatch must be uniform across tiers or one tier's
+// canonical seeds would route to a different strategy than another's.
+func resolveMutationStrategy(m Mutation) (strategy, bool) {
+	if m.Strategy == "mutate_fixture" && strings.TrimSpace(m.ActionLegacy) != "" {
+		return fixtureActionStrategy{}, true
+	}
+	strat, ok := strategies[m.Strategy]
+	return strat, ok
 }
 
 // cassetteResponseStrategies enumerates strategy names that perturb the
@@ -538,7 +675,7 @@ func mutationDidNotDiscriminateReason(idx int, m Mutation, branch branchKind, sc
 // declared expectation. The bool return is false when the strategy is not
 // implemented in this build, signalling tier_unsupported to the caller.
 func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason, bool) {
-	strat, ok := strategies[m.Strategy]
+	strat, ok := resolveMutationStrategy(m)
 	if !ok {
 		return strategyUnsupportedReason(idx, m.Strategy), false
 	}

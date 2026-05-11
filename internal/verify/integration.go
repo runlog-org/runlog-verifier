@@ -462,7 +462,7 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 	cassetteResponse := isCassetteResponseStrategy(m.Strategy)
 
 	if !cassetteResponse {
-		if _, ok := strategies[m.Strategy]; !ok {
+		if _, ok := resolveMutationStrategy(m); !ok {
 			return strategyUnsupportedReason(idx, m.Strategy), false
 		}
 	}
@@ -511,7 +511,13 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 			}
 			stubCassette = perturbed
 		} else {
-			strat := strategies[m.Strategy]
+			// resolveMutationStrategy routes mutate_fixture's
+			// action-discriminator shape to fixtureActionStrategy (B21)
+			// while preserving the static-registry path for everything
+			// else. The non-ok branch was already gated above before
+			// forEachMutationBranch fanned out, so the second-lookup ok
+			// here is guaranteed.
+			strat, _ := resolveMutationStrategy(m)
 			var err error
 			mutInputs, mutSetup, mutAction, err = strat.apply(baseline, m)
 			if err != nil {
