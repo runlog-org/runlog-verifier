@@ -68,6 +68,10 @@ func stepFromMap(m map[string]any) runner.Step {
 // Literals without a `value` field are skipped silently (the schema validates
 // the shape upstream; we don't redundantly enforce it here).
 //
+// After per-branch overrides land, a single-pass `$KEY → out[$KEY]` resolution
+// lets seeds wire chained literal swaps (e.g. `$BASE_IMAGE: $LITERAL_1`);
+// deeper chains are out of scope.
+//
 // Returns a new map; the input is not mutated. nil literals → returns inputs
 // unchanged (possibly nil).
 func mergeLiterals(literals map[string]any, inputs map[string]any) map[string]any {
@@ -89,6 +93,34 @@ func mergeLiterals(literals map[string]any, inputs map[string]any) map[string]an
 	// Per-branch inputs override literals on key collision.
 	for k, v := range inputs {
 		out[k] = v
+	}
+	// Chained $-token resolution (single pass): if a value is a string of
+	// form $KEY and $KEY is itself a key in the merged map, replace the
+	// value with what $KEY resolves to. Enables seeds to wire per-branch
+	// literal swaps like:
+	//   differential.inputs.failed_approach.$BASE_IMAGE: $LITERAL_1
+	//   differential.inputs.working_approach.$BASE_IMAGE: $LITERAL_2
+	// so $BASE_IMAGE inside a body resolves to the literal block's value
+	// (e.g. "debian:12") rather than the raw "$LITERAL_1" string.
+	//
+	// Single pass only — deeper chains ($A → $B → $C) are out of scope.
+	// Self-references ($X → $X) and missing references ($Y where $Y is
+	// not in the map) pass through unchanged (substituteVars handles the
+	// missing case at substitution time; self-references are no-ops).
+	for k, v := range out {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		if !strings.HasPrefix(s, "$") {
+			continue
+		}
+		if s == k {
+			continue // self-reference; leave alone
+		}
+		if resolved, present := out[s]; present {
+			out[k] = resolved
+		}
 	}
 	return out
 }
