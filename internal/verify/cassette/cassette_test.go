@@ -392,8 +392,8 @@ func TestParseRuntimeShareStateDefaultFalse(t *testing.T) {
 	if cas.Runtime == nil {
 		t.Fatalf("runtime nil")
 	}
-	if cas.Runtime.ShareStateAcrossMutations {
-		t.Errorf("expected ShareStateAcrossMutations=false by default, got true")
+	if cas.Runtime.ShareStateAcrossMutations != nil {
+		t.Errorf("expected ShareStateAcrossMutations=nil by default, got non-nil")
 	}
 }
 
@@ -409,7 +409,7 @@ func TestParseRuntimeShareStateTrue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if !cas.Runtime.ShareStateAcrossMutations {
+	if cas.Runtime.ShareStateAcrossMutations == nil || !*cas.Runtime.ShareStateAcrossMutations {
 		t.Errorf("expected ShareStateAcrossMutations=true")
 	}
 }
@@ -428,6 +428,60 @@ func TestParseRuntimeShareStateNonBool(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "share_state_across_mutations must be a boolean") {
 		t.Errorf("expected typed error, got: %v", err)
+	}
+}
+
+func TestParseRuntimeShareStateAbsent(t *testing.T) {
+	raw := map[string]any{
+		"mode": "reexecute",
+		"runtime": map[string]any{
+			"tool":    "docker",
+			"version": "24",
+		},
+	}
+	cas, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cas.Runtime == nil {
+		t.Fatalf("runtime nil")
+	}
+	if cas.Runtime.ShareStateAcrossMutations != nil {
+		t.Errorf("expected ShareStateAcrossMutations=nil for absent field, got non-nil")
+	}
+}
+
+func TestParseRuntimeShareStateExplicitTrue(t *testing.T) {
+	raw := map[string]any{
+		"mode": "reexecute",
+		"runtime": map[string]any{
+			"tool":                        "docker",
+			"share_state_across_mutations": true,
+		},
+	}
+	cas, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cas.Runtime.ShareStateAcrossMutations == nil || !*cas.Runtime.ShareStateAcrossMutations {
+		t.Errorf("expected ShareStateAcrossMutations=&true")
+	}
+}
+
+func TestParseRuntimeShareStateExplicitFalse(t *testing.T) {
+	raw := map[string]any{
+		"mode": "reexecute",
+		"runtime": map[string]any{
+			"tool":                        "docker",
+			"share_state_across_mutations": false,
+		},
+	}
+	cas, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cas.Runtime.ShareStateAcrossMutations == nil || *cas.Runtime.ShareStateAcrossMutations {
+		t.Errorf("expected ShareStateAcrossMutations=&false")
 	}
 }
 

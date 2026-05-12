@@ -425,7 +425,7 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	// savings — not worth the safety surface; see F-NN3 follow-up). Other
 	// tools setting the flag get a typed seed-author rejection so the
 	// mistake surfaces precisely rather than silently no-op'ing.
-	if cas.Runtime.ShareStateAcrossMutations && cas.Runtime.Tool != "docker" {
+	if cas.Runtime.ShareStateAcrossMutations != nil && *cas.Runtime.ShareStateAcrossMutations && cas.Runtime.Tool != "docker" {
 		return rejected(res, "share_state_unsupported_for_tool", fmt.Sprintf(
 			"cassette.runtime.share_state_across_mutations=true is only "+
 				"supported for tool: docker in this verifier build (got "+
@@ -692,13 +692,13 @@ func reexecuteRunErrorCode(err error, defaultCode string) string {
 // as mutation_strategy_unsupported so authors don't mix them into a non-HTTP
 // cassette. The shared aggregation loop lives in iterateMutations (mutate.go).
 //
-// When cas.Runtime.ShareStateAcrossMutations is true the F87 shared-state path
+// When cas.Runtime.ShareStateAcrossMutations is non-nil and true the F87 shared-state path
 // is taken: mutations re-use the baseline branch's already-provisioned sandbox
 // and skip per-mutation setup_script re-execution. The tool-specific gate in
 // runReexecute already rejects non-docker tools before we reach here, so the
 // shared path trusts cas.Runtime.Tool == "docker".
 func runReexecuteMutations(e *Entry, b mutationBaseline, cas *cassette.Cassette) ([]Reason, bool) {
-	if cas.Runtime != nil && cas.Runtime.ShareStateAcrossMutations {
+	if cas.Runtime != nil && cas.Runtime.ShareStateAcrossMutations != nil && *cas.Runtime.ShareStateAcrossMutations {
 		return iterateMutations(e, func(m Mutation, i int) ([]Reason, bool) {
 			return runOneReexecuteMutationShared(e, b, m, i, cas)
 		})

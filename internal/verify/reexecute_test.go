@@ -11,6 +11,10 @@ import (
 	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
+// boolPtr returns a pointer to the given bool value. Used at construction
+// sites that set cassette.Runtime.ShareStateAcrossMutations (a *bool tri-state).
+func boolPtr(b bool) *bool { return &b }
+
 // skipIfNoSh skips when /bin/sh isn't on PATH. The reexecute orchestrator's
 // shell-tool path needs `sh` in the same way the unit-tier needs `python3`;
 // CI ubuntu-latest has it but sandboxed test runners might not.
@@ -566,7 +570,7 @@ func TestReexecuteMutationSharedPathSkipsProvision(t *testing.T) {
 		Mode: "reexecute",
 		Runtime: &cassette.Runtime{
 			Tool:                      "docker",
-			ShareStateAcrossMutations: true,
+			ShareStateAcrossMutations: boolPtr(true),
 		},
 	}
 
@@ -612,7 +616,7 @@ func TestRunReexecuteShareStateRejectedForNonDocker(t *testing.T) {
 		Mode: "reexecute",
 		Runtime: &cassette.Runtime{
 			Tool:                      "postgres",
-			ShareStateAcrossMutations: true,
+			ShareStateAcrossMutations: boolPtr(true),
 		},
 	}
 
