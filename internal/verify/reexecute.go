@@ -93,6 +93,27 @@ var reexecuteSupportedTools = map[string]bool{
 	"docker":   true,
 }
 
+// shareStateSupportedTools is the F87/F93 allow-list for tools that may
+// set cassette.runtime.share_state_across_mutations: true. The shared
+// mutation path itself is tool-agnostic (runOneReexecuteMutationShared
+// calls baseline.Driver.Run directly via the abstract runner.Driver
+// interface), so adding a tool here is the single registry edit needed
+// to opt in.
+//
+// docker — F87 v0.1: per-mutation container/cache reuse, ~2.5min → ~30s
+// on a 5-mutation cold-cache seed.
+// postgres / redis — F93: per-mutation provision is ~1s; share-state
+// skips it. Seeds shoulder row-leak safety: include TRUNCATE / FLUSHDB
+// in setup_script if mutations need a clean state.
+//
+// shell / sqlite — intentionally excluded. Provision is sub-100ms; the
+// optimization isn't worth the seed-author footgun.
+var shareStateSupportedTools = map[string]bool{
+	"docker":   true,
+	"postgres": true,
+	"redis":    true,
+}
+
 // startSidecarFixtures iterates cas.SidecarFixtures and starts each enabled
 // sidecar (one whose name in inputs is unset, true, or any non-false value;
 // a mutate_fixture mutation that sets inputs[name] = false skips the start).
@@ -426,6 +447,13 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 	// cassette's structure is safe, promote the flag to &true so F87's
 	// existing share path picks it up. Explicit author values always
 	// win — auto-promotion only fills the nil case.
+	//
+	// Auto-promotion stays docker-only by design (F93 widened the gate
+	// for explicit opt-in but not the predicate). IsShareStateSafe
+	// analyzes mutation-strategy / target structure (B20-aware compound
+	// check); it can't statically reason about database row-state
+	// leakage from setup_script side effects, so postgres/redis seeds
+	// must opt in explicitly and shoulder the row-leak responsibility.
 	if cas.Runtime.ShareStateAcrossMutations == nil &&
 		cas.Runtime.Tool == "docker" &&
 		IsShareStateSafe(cas, e.Verification.Mutations) {
@@ -433,18 +461,22 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 		cas.Runtime.ShareStateAcrossMutations = &v
 	}
 
-	// share_state_across_mutations is a docker-only optimization in v0.1
-	// (postgres/redis sharing leaks row state across mutations for ~1s
-	// savings — not worth the safety surface; see F-NN3 follow-up). Other
-	// tools setting the flag get a typed seed-author rejection so the
-	// mistake surfaces precisely rather than silently no-op'ing.
-	if cas.Runtime.ShareStateAcrossMutations != nil && *cas.Runtime.ShareStateAcrossMutations && cas.Runtime.Tool != "docker" {
+	// share_state_across_mutations is permitted only for tools whose
+	// per-mutation provision cost justifies the share-state opt-in. F87
+	// shipped docker; F93 added postgres and redis (each ~1s/mutation,
+	// worth the share-state opt-in for higher-mutation seeds). Seeds are
+	// responsible for row-leak safety: TRUNCATE / FLUSHDB in
+	// setup_script if mutations need a clean state. Tools outside the
+	// allow-list (shell, sqlite, future kinds) that set the flag get a
+	// typed seed-author rejection so the mistake surfaces precisely
+	// rather than silently no-op'ing.
+	if cas.Runtime.ShareStateAcrossMutations != nil && *cas.Runtime.ShareStateAcrossMutations && !shareStateSupportedTools[cas.Runtime.Tool] {
 		return rejected(res, "share_state_unsupported_for_tool", fmt.Sprintf(
 			"cassette.runtime.share_state_across_mutations=true is only "+
-				"supported for tool: docker in this verifier build (got "+
-				"tool: %q). Other tools provision in <1s and don't need "+
-				"the optimization; postgres/redis support is a follow-up "+
-				"once a real seed surfaces meaningful cold-start cost",
+				"supported for tools whose per-mutation provision cost "+
+				"justifies the opt-in (currently: docker, postgres, "+
+				"redis). Got tool: %q — its provision is sub-100ms and "+
+				"the optimization would only add a row-state-leak surface",
 			cas.Runtime.Tool,
 		))
 	}
@@ -707,9 +739,10 @@ func reexecuteRunErrorCode(err error, defaultCode string) string {
 //
 // When cas.Runtime.ShareStateAcrossMutations is non-nil and true the F87 shared-state path
 // is taken: mutations re-use the baseline branch's already-provisioned sandbox
-// and skip per-mutation setup_script re-execution. The tool-specific gate in
-// runReexecute already rejects non-docker tools before we reach here, so the
-// shared path trusts cas.Runtime.Tool == "docker".
+// and skip per-mutation setup_script re-execution.
+// The tool-specific gate in runReexecute already rejects tools outside
+// shareStateSupportedTools before we reach here, so the shared path
+// trusts cas.Runtime.Tool is one of {docker, postgres, redis}.
 func runReexecuteMutations(e *Entry, b mutationBaseline, cas *cassette.Cassette) ([]Reason, bool) {
 	if cas.Runtime != nil && cas.Runtime.ShareStateAcrossMutations != nil && *cas.Runtime.ShareStateAcrossMutations {
 		return iterateMutations(e, func(m Mutation, i int) ([]Reason, bool) {
@@ -804,9 +837,10 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 // here.
 //
 // Routed only when cas.Runtime.ShareStateAcrossMutations is true; the
-// tool-specific gate in runReexecute already rejects non-docker tools
-// with this flag set, so this function trusts that cas.Runtime.Tool
-// is "docker". See plan M04-F87 for the full safety contract.
+// tool-specific gate in runReexecute already rejects tools outside
+// shareStateSupportedTools with this flag set, so this function trusts
+// cas.Runtime.Tool is one of {docker, postgres, redis}. See plan
+// M04-F87 for the full safety contract; F93 widened the gate.
 func runOneReexecuteMutationShared(e *Entry, b mutationBaseline, m Mutation, idx int, cas *cassette.Cassette) ([]Reason, bool) {
 	if isCassetteResponseStrategy(m.Strategy) {
 		return []Reason{{

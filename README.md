@@ -101,16 +101,21 @@ docker rm -f` (and similar for `images` / `network ls` / `buildx ls`).
 > re-runs within a branch re-use the baseline branch's already-
 > provisioned sandbox and skip the per-mutation re-execution of
 > `cassette.setup_script` — typically dropping a 5-mutation seed from
-> ~2.5 min to ~30 s on a cold cache. v0.1 honors this only for
-> `tool: docker`; postgres/redis share-state is a follow-up. The
-> seed author is responsible for share-state safety: mutations within
-> a branch must be idempotent against the shared sandbox state — use
-> `--rm` for transient containers, don't `mutate_fixture` on inputs
-> that `setup_script` consumes, and don't run state-mutating non-`--rm`
-> commands. Per-branch isolation is preserved (failed and working
-> still get separate sandboxes); only per-mutation isolation within a
-> branch is relaxed. Cassettes that set this flag with a non-docker
-> tool surface a typed `share_state_unsupported_for_tool` rejection
+> ~2.5 min to ~30 s on a cold cache. Also supported for `tool: postgres`
+> and `tool: redis` (each ~1s/mutation provision); those seeds shoulder
+> the row-leak risk themselves: include `TRUNCATE` (postgres) or
+> `FLUSHDB` (redis) in `setup_script` if mutations need a clean state.
+> F91's static-analysis auto-promotion is docker-only — postgres/redis
+> cassettes must opt in explicitly via
+> `share_state_across_mutations: true`. The seed author is responsible
+> for share-state safety: mutations within a branch must be idempotent
+> against the shared sandbox state — use `--rm` for transient
+> containers, don't `mutate_fixture` on inputs that `setup_script`
+> consumes, and don't run state-mutating non-`--rm` commands. Per-branch
+> isolation is preserved (failed and working still get separate
+> sandboxes); only per-mutation isolation within a branch is relaxed.
+> Cassettes that set this flag with a tool outside `{docker, postgres,
+> redis}` surface a typed `share_state_unsupported_for_tool` rejection
 > at validation time.
 
 Verifier function-tier (`isolation: function`) entries continue to use
@@ -175,7 +180,8 @@ All three verification tiers are functional:
   per-mutation cassette mutation via `mutate_cassette_response`), and
   `reexecute` for `tool: shell | sqlite | postgres | redis | docker`
   (per-branch sandbox driven via `runner.SubprocessDriver`, with the
-  docker driver supporting `cassette.runtime.share_state_across_mutations`).
+  postgres / redis / docker drivers supporting
+  `cassette.runtime.share_state_across_mutations`).
 
 The CLI's output shape is stable; the server's `verification_signature`
 parameter validates submitted bundles against the registered public key

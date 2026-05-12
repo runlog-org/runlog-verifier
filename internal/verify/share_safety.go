@@ -32,6 +32,14 @@ import (
 // call site; this predicate only fires when the field is absent and
 // the caller is choosing whether to auto-promote.
 //
+// Tool scope. Auto-promotion stays docker-only by design — F93 widened
+// the explicit-opt-in gate to permit postgres/redis but did NOT extend
+// auto-promotion. The predicate analyzes mutation-strategy and target
+// shape; it can't statically reason about database row-state leakage
+// from setup_script side effects, so postgres/redis seeds must opt in
+// explicitly via share_state_across_mutations: true and shoulder the
+// row-leak responsibility (TRUNCATE / FLUSHDB in setup_script).
+//
 // F89's future fixture-mutation strategies may need to extend the
 // unsafe-marker set here; the predicate currently keys on the
 // "mutate_fixture" strategy name.
