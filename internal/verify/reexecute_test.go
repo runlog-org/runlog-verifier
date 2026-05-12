@@ -479,9 +479,10 @@ func TestCleanupReexecuteSandbox(t *testing.T) {
 	})
 }
 
-// TestRunReexecuteShareStateRejectedForNonDocker covers the F87 v0.1 gate:
-// cassette.runtime.share_state_across_mutations=true is only honored for
-// tool: docker. Other tools that set the flag get a typed
+// TestRunReexecuteShareStateRejectedForUnsupportedTool covers the F87/F93
+// gate: cassette.runtime.share_state_across_mutations=true is only honored
+// for tools in shareStateSupportedTools (docker, postgres, redis). Tools
+// outside that set (shell, sqlite, future kinds) get a typed
 // share_state_unsupported_for_tool rejection so the seed-author mistake
 // surfaces precisely.
 // TestReexecuteMutationSharedPathSkipsProvision covers the F87 dispatcher in
@@ -598,7 +599,51 @@ func (f driverFunc) Run(setup, action []runner.Step, inputs map[string]any, time
 	return f(setup, action, inputs, timeout)
 }
 
-func TestRunReexecuteShareStateRejectedForNonDocker(t *testing.T) {
+func TestRunReexecuteShareStateRejectedForUnsupportedTool(t *testing.T) {
+	e := &Entry{
+		UnitID: "test-unit",
+		Verification: Verification{
+			Isolation:      "database",
+			TimeoutSeconds: 5,
+		},
+		FailedApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+		WorkingApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+	}
+	cas := &cassette.Cassette{
+		Mode: "reexecute",
+		Runtime: &cassette.Runtime{
+			Tool:                      "sqlite",
+			ShareStateAcrossMutations: boolPtr(true),
+		},
+	}
+
+	res := runReexecute(e, cas)
+
+	if res.Status == "verified" {
+		t.Fatalf("expected rejection, got status=verified")
+	}
+	if len(res.Reasons) == 0 {
+		t.Fatalf("expected reasons, got none")
+	}
+	if res.Reasons[0].Code != "share_state_unsupported_for_tool" {
+		t.Errorf("reason.Code=%q, want share_state_unsupported_for_tool (msg=%q)",
+			res.Reasons[0].Code, res.Reasons[0].Message)
+	}
+	if !strings.Contains(res.Reasons[0].Message, "sqlite") {
+		t.Errorf("reason.Message should name the offending tool; got %q", res.Reasons[0].Message)
+	}
+}
+
+// TestRunReexecuteShareStateAcceptedForPostgres covers the F93 gate widening:
+// postgres cassettes with share_state_across_mutations=true must NOT receive
+// the share_state_unsupported_for_tool rejection. The end-to-end run will
+// still fail in test env (no real postgres available), but the failure
+// reason must NOT be the F87/F93 tool gate.
+func TestRunReexecuteShareStateAcceptedForPostgres(t *testing.T) {
 	e := &Entry{
 		UnitID: "test-unit",
 		Verification: Verification{
@@ -622,18 +667,44 @@ func TestRunReexecuteShareStateRejectedForNonDocker(t *testing.T) {
 
 	res := runReexecute(e, cas)
 
-	if res.Status == "verified" {
-		t.Fatalf("expected rejection, got status=verified")
+	for _, r := range res.Reasons {
+		if r.Code == "share_state_unsupported_for_tool" {
+			t.Errorf("postgres + share_state=true unexpectedly rejected by F87/F93 gate (msg=%q)", r.Message)
+		}
 	}
-	if len(res.Reasons) == 0 {
-		t.Fatalf("expected reasons, got none")
+}
+
+// TestRunReexecuteShareStateAcceptedForRedis is the F93 redis counterpart of
+// TestRunReexecuteShareStateAcceptedForPostgres. See that test's doc for
+// the rationale.
+func TestRunReexecuteShareStateAcceptedForRedis(t *testing.T) {
+	e := &Entry{
+		UnitID: "test-unit",
+		Verification: Verification{
+			Isolation:      "database",
+			TimeoutSeconds: 5,
+		},
+		FailedApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "shell", Body: "redis-cli PING"}},
+		},
+		WorkingApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "shell", Body: "redis-cli PING"}},
+		},
 	}
-	if res.Reasons[0].Code != "share_state_unsupported_for_tool" {
-		t.Errorf("reason.Code=%q, want share_state_unsupported_for_tool (msg=%q)",
-			res.Reasons[0].Code, res.Reasons[0].Message)
+	cas := &cassette.Cassette{
+		Mode: "reexecute",
+		Runtime: &cassette.Runtime{
+			Tool:                      "redis",
+			ShareStateAcrossMutations: boolPtr(true),
+		},
 	}
-	if !strings.Contains(res.Reasons[0].Message, "postgres") {
-		t.Errorf("reason.Message should name the offending tool; got %q", res.Reasons[0].Message)
+
+	res := runReexecute(e, cas)
+
+	for _, r := range res.Reasons {
+		if r.Code == "share_state_unsupported_for_tool" {
+			t.Errorf("redis + share_state=true unexpectedly rejected by F87/F93 gate (msg=%q)", r.Message)
+		}
 	}
 }
 
