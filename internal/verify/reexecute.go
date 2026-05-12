@@ -420,6 +420,19 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 		))
 	}
 
+	// F91: auto-detect share-safety for docker cassettes that don't set
+	// share_state_across_mutations explicitly. When the field is absent
+	// (nil) AND the tool is docker AND IsShareStateSafe says the
+	// cassette's structure is safe, promote the flag to &true so F87's
+	// existing share path picks it up. Explicit author values always
+	// win — auto-promotion only fills the nil case.
+	if cas.Runtime.ShareStateAcrossMutations == nil &&
+		cas.Runtime.Tool == "docker" &&
+		IsShareStateSafe(cas, e.Verification.Mutations) {
+		v := true
+		cas.Runtime.ShareStateAcrossMutations = &v
+	}
+
 	// share_state_across_mutations is a docker-only optimization in v0.1
 	// (postgres/redis sharing leaks row state across mutations for ~1s
 	// savings — not worth the safety surface; see F-NN3 follow-up). Other
