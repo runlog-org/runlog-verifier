@@ -103,9 +103,10 @@ type DirectoryFixture struct {
 // per-mutation setup_script. v0.1 honors this only for tool: docker;
 // other tools surface share_state_unsupported_for_tool at validation.
 type Runtime struct {
-	Tool                      string
-	Version                   string
-	ShareStateAcrossMutations bool
+	Tool    string
+	Version string
+	// nil = unset, &true = explicit opt-in, &false = explicit opt-out
+	ShareStateAcrossMutations *bool
 }
 
 // Step is one recorded HTTP exchange.
@@ -164,6 +165,10 @@ func (c *Cassette) Clone() *Cassette {
 	}
 	if c.Runtime != nil {
 		rt := *c.Runtime
+		if c.Runtime.ShareStateAcrossMutations != nil {
+			v := *c.Runtime.ShareStateAcrossMutations
+			rt.ShareStateAcrossMutations = &v
+		}
 		out.Runtime = &rt
 	}
 	out.SidecarFixtures = append([]SidecarFixture(nil), c.SidecarFixtures...)
@@ -320,15 +325,15 @@ func parseRuntime(raw any) (*Runtime, error) {
 		return nil, errors.New("cassette.runtime.tool is required and must be a non-empty string")
 	}
 	version, _ := m["version"].(string)
-	share := false
+	var sharePtr *bool
 	if rawShare, ok := m["share_state_across_mutations"]; ok {
 		b, isBool := rawShare.(bool)
 		if !isBool {
 			return nil, fmt.Errorf("cassette.runtime.share_state_across_mutations must be a boolean (got %T)", rawShare)
 		}
-		share = b
+		sharePtr = &b
 	}
-	return &Runtime{Tool: tool, Version: version, ShareStateAcrossMutations: share}, nil
+	return &Runtime{Tool: tool, Version: version, ShareStateAcrossMutations: sharePtr}, nil
 }
 
 // parseScriptLines decodes a setup_script / teardown_script field. Each

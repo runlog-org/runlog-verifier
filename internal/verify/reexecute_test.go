@@ -11,6 +11,10 @@ import (
 	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
+// boolPtr returns a pointer to the given bool value. Used at construction
+// sites that set cassette.Runtime.ShareStateAcrossMutations (a *bool tri-state).
+func boolPtr(b bool) *bool { return &b }
+
 // skipIfNoSh skips when /bin/sh isn't on PATH. The reexecute orchestrator's
 // shell-tool path needs `sh` in the same way the unit-tier needs `python3`;
 // CI ubuntu-latest has it but sandboxed test runners might not.
@@ -566,7 +570,7 @@ func TestReexecuteMutationSharedPathSkipsProvision(t *testing.T) {
 		Mode: "reexecute",
 		Runtime: &cassette.Runtime{
 			Tool:                      "docker",
-			ShareStateAcrossMutations: true,
+			ShareStateAcrossMutations: boolPtr(true),
 		},
 	}
 
@@ -612,7 +616,7 @@ func TestRunReexecuteShareStateRejectedForNonDocker(t *testing.T) {
 		Mode: "reexecute",
 		Runtime: &cassette.Runtime{
 			Tool:                      "postgres",
-			ShareStateAcrossMutations: true,
+			ShareStateAcrossMutations: boolPtr(true),
 		},
 	}
 
@@ -630,6 +634,118 @@ func TestRunReexecuteShareStateRejectedForNonDocker(t *testing.T) {
 	}
 	if !strings.Contains(res.Reasons[0].Message, "postgres") {
 		t.Errorf("reason.Message should name the offending tool; got %q", res.Reasons[0].Message)
+	}
+}
+
+// TestRunReexecute_AutoSharePromotesUnsetFlagForDocker covers F91 auto-promotion:
+// a docker cassette with ShareStateAcrossMutations=nil and an auto-eligible
+// structure (no mutations, no setup_script) should have the flag promoted to
+// &true before the F87 gate fires.
+func TestRunReexecute_AutoSharePromotesUnsetFlagForDocker(t *testing.T) {
+	e := &Entry{
+		UnitID: "test-unit",
+		Verification: Verification{
+			Isolation:      "database",
+			TimeoutSeconds: 5,
+		},
+		FailedApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+		WorkingApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+	}
+	cas := &cassette.Cassette{
+		Mode: "reexecute",
+		Runtime: &cassette.Runtime{
+			Tool: "docker",
+			// ShareStateAcrossMutations intentionally absent (nil)
+		},
+	}
+
+	// runReexecute may fail downstream (no real docker tool available), but
+	// auto-promotion fires before any branch execution — assert the mutated
+	// cassette state regardless of the returned result.
+	runReexecute(e, cas)
+
+	if cas.Runtime.ShareStateAcrossMutations == nil {
+		t.Fatal("expected ShareStateAcrossMutations to be promoted to &true, got nil")
+	}
+	if !*cas.Runtime.ShareStateAcrossMutations {
+		t.Errorf("expected ShareStateAcrossMutations=true after auto-promotion, got false")
+	}
+}
+
+// TestRunReexecute_AutoShareSkippedWhenExplicitFalse covers F91 opt-out: when
+// the author explicitly sets ShareStateAcrossMutations=false, auto-promotion
+// must not fire — the explicit value wins.
+func TestRunReexecute_AutoShareSkippedWhenExplicitFalse(t *testing.T) {
+	e := &Entry{
+		UnitID: "test-unit",
+		Verification: Verification{
+			Isolation:      "database",
+			TimeoutSeconds: 5,
+		},
+		FailedApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+		WorkingApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+	}
+	cas := &cassette.Cassette{
+		Mode: "reexecute",
+		Runtime: &cassette.Runtime{
+			Tool:                      "docker",
+			ShareStateAcrossMutations: boolPtr(false),
+		},
+	}
+
+	runReexecute(e, cas)
+
+	if cas.Runtime.ShareStateAcrossMutations == nil {
+		t.Fatal("expected ShareStateAcrossMutations to remain non-nil")
+	}
+	if *cas.Runtime.ShareStateAcrossMutations {
+		t.Errorf("expected ShareStateAcrossMutations=false (explicit opt-out), got true")
+	}
+}
+
+// TestRunReexecute_AutoShareSkippedForNonDocker covers F91 tool-gate bypass:
+// a non-docker cassette with ShareStateAcrossMutations=nil must not be
+// auto-promoted, and must not hit the share_state_unsupported_for_tool
+// rejection (the gate only fires for non-nil &true).
+func TestRunReexecute_AutoShareSkippedForNonDocker(t *testing.T) {
+	e := &Entry{
+		UnitID: "test-unit",
+		Verification: Verification{
+			Isolation:      "database",
+			TimeoutSeconds: 5,
+		},
+		FailedApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+		WorkingApproach: Branch{
+			Action: []runner.Step{{Type: "code", Lang: "sql", Body: "SELECT 1;"}},
+		},
+	}
+	cas := &cassette.Cassette{
+		Mode: "reexecute",
+		Runtime: &cassette.Runtime{
+			Tool: "postgres",
+			// ShareStateAcrossMutations intentionally absent (nil)
+		},
+	}
+
+	res := runReexecute(e, cas)
+
+	if cas.Runtime.ShareStateAcrossMutations != nil {
+		t.Errorf("expected ShareStateAcrossMutations to remain nil for non-docker, got %v", *cas.Runtime.ShareStateAcrossMutations)
+	}
+	for _, r := range res.Reasons {
+		if r.Code == "share_state_unsupported_for_tool" {
+			t.Errorf("unexpected share_state_unsupported_for_tool rejection for nil flag on non-docker tool")
+		}
 	}
 }
 
