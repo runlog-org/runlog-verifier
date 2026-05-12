@@ -114,6 +114,21 @@ var shareStateSupportedTools = map[string]bool{
 	"redis":    true,
 }
 
+// shareStateSupportedToolsMessage renders the sorted, comma-separated
+// list of tools that may opt into cassette.runtime.share_state_across_mutations
+// for inclusion in the share_state_unsupported_for_tool reason. Derived
+// from the registry so adding a tool here is a one-line edit and the
+// error message stays in sync automatically (prior hand-rolled rendering
+// drifted from the registry between F87 and F93).
+func shareStateSupportedToolsMessage() string {
+	names := make([]string, 0, len(shareStateSupportedTools))
+	for name := range shareStateSupportedTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 // startSidecarFixtures iterates cas.SidecarFixtures and starts each enabled
 // sidecar (one whose name in inputs is unset, true, or any non-false value;
 // a mutate_fixture mutation that sets inputs[name] = false skips the start).
@@ -474,10 +489,10 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 		return rejected(res, "share_state_unsupported_for_tool", fmt.Sprintf(
 			"cassette.runtime.share_state_across_mutations=true is only "+
 				"supported for tools whose per-mutation provision cost "+
-				"justifies the opt-in (currently: docker, postgres, "+
-				"redis). Got tool: %q — its provision is sub-100ms and "+
-				"the optimization would only add a row-state-leak surface",
-			cas.Runtime.Tool,
+				"justifies the opt-in (currently: %s). Got tool: %q — "+
+				"its provision is sub-100ms and the optimization would "+
+				"only add a row-state-leak surface",
+			shareStateSupportedToolsMessage(), cas.Runtime.Tool,
 		))
 	}
 
@@ -514,12 +529,8 @@ func runReexecute(e *Entry, cas *cassette.Cassette) Result {
 
 	// ── Outcome matching ──────────────────────────────────────────────
 	var reasons []Reason
-	reasons = append(reasons, matchOutcome(branchFailed, failedRes, e.Verification.Differential)...)
-	reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
-	reasons = append(reasons, matchActionPlanNodeTiming("failed_approach", e.FailedApproach.Assertion, failedRes)...)
-	reasons = append(reasons, matchActionPlanNodeTiming("working_approach", e.WorkingApproach.Assertion, workingRes)...)
-	reasons = append(reasons, matchActionOutputPattern("failed_approach", e.FailedApproach.Assertion, failedRes)...)
-	reasons = append(reasons, matchActionOutputPattern("working_approach", e.WorkingApproach.Assertion, workingRes)...)
+	reasons = append(reasons, matchBranchOutcome(branchFailed, failedRes, e.FailedApproach.Assertion, e.Verification.Differential)...)
+	reasons = append(reasons, matchBranchOutcome(branchWorking, workingRes, e.WorkingApproach.Assertion, e.Verification.Differential)...)
 	if len(reasons) > 0 {
 		return rejectedReasons(res, reasons)
 	}
@@ -713,20 +724,39 @@ func cleanupReexecuteSandbox(driver runner.SubprocessDriver, cas *cassette.Casse
 // function — setup-script never raises those, so the extra arm is a
 // no-op for the setup call but keeps the err→code map authoritative
 // in one place.
+//
+// Delegates the common sentinel arms (InvalidName / InterpreterMissing /
+// Timeout / LanguageUnsupported / SubprocessTool) to
+// subprocessDriverErrorCode; the reexecute-specific provisioning sentinels
+// (postgres / redis / docker) stay here because the unit-tier path doesn't
+// route through provisioners.
 func reexecuteRunErrorCode(err error, defaultCode string) string {
 	switch {
+	case errors.Is(err, runner.ErrPostgresProvision),
+		errors.Is(err, runner.ErrRedisProvision),
+		errors.Is(err, runner.ErrDockerProvision):
+		return "runtime_provision_failed"
+	}
+	return subprocessDriverErrorCode(err, defaultCode, "cassette_input_invalid_name")
+}
+
+// subprocessDriverErrorCode is the shared error→Reason.Code map for the
+// SubprocessDriver sentinels common across unit-tier subprocess and
+// reexecute-mode integration tiers. The invalidNameCode parameter
+// distinguishes the unit-tier code ("input_invalid_name", no cassette
+// context) from the reexecute-mode code ("cassette_input_invalid_name").
+// Returns defaultCode when no sentinel matches so callers compose
+// tier-specific arms on top.
+func subprocessDriverErrorCode(err error, defaultCode, invalidNameCode string) string {
+	switch {
 	case errors.Is(err, runner.ErrInputInvalidName):
-		return "cassette_input_invalid_name"
+		return invalidNameCode
 	case errors.Is(err, runner.ErrInterpreterMissing):
 		return "runtime_unavailable"
 	case errors.Is(err, runner.ErrTimeout):
 		return "branch_timeout"
 	case errors.Is(err, runner.ErrLanguageUnsupported), errors.Is(err, runner.ErrSubprocessTool):
 		return "language_not_yet_implemented"
-	case errors.Is(err, runner.ErrPostgresProvision),
-		errors.Is(err, runner.ErrRedisProvision),
-		errors.Is(err, runner.ErrDockerProvision):
-		return "runtime_provision_failed"
 	}
 	return defaultCode
 }
@@ -759,15 +789,7 @@ func runReexecuteMutations(e *Entry, b mutationBaseline, cas *cassette.Cassette)
 // state from the baseline + prior mutations doesn't leak.
 func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, cas *cassette.Cassette) ([]Reason, bool) {
 	if isCassetteResponseStrategy(m.Strategy) {
-		return []Reason{{
-			Code: "mutation_strategy_unsupported",
-			Message: fmt.Sprintf(
-				"mutation #%d strategy %q targets a cassette response, but reexecute "+
-					"mode has no HTTP responses to perturb. Use mutate_fixture / "+
-					"set_literal_value / swap_* / remove_kwarg / drop_flag at "+
-					"reexecute tier",
-				idx+1, m.Strategy),
-		}}, false
+		return cassetteResponseAtTierRejection(idx, m.Strategy, "reexecute mode"), false
 	}
 	strat, ok := resolveMutationStrategy(m)
 	if !ok {
@@ -792,34 +814,21 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 				cas, mutSetup, mutAction, mutInputs, b.Timeout)
 			defer cleanupReexecuteSandbox(mutDriver, cas, mutInputs, b.Timeout)
 
-			if runReason != nil {
-				// Environmental failures (timeout, missing tool) stay as-is;
-				// in-band step crashes have already been folded into the
-				// ExecResult.Raised path by the driver and won't reach here.
-				if runErr != nil && isEnvErr(runErr) {
-					return []Reason{mutationRunnerErrorReasonMsg(runReason.Message)}
-				}
-				// setup_script_failed under a mutation: synthesize a raised
-				// ExecResult so the outcome classifier produces outcomeFail.
-				// The setup script is part of the test surface — if a mutation
-				// breaks it, that's a real fail, not a runner error. Reuse the
-				// shared helper so the synthesized-crash shape stays uniform
-				// with replay/unit tier; the message form keeps the pre-formatted
-				// "branch: err" wrapping that runReason already carries.
-				got = synthesizeMutationCrashMessage(runReason.Message)
+			// Environmental failures (timeout, missing tool) short-circuit as
+			// mutation_runner_error; setup_script_failed and other in-band
+			// failures synthesize a raised ExecResult so classifyOutcome
+			// produces outcomeFail. The setup script is part of the test
+			// surface — if a mutation breaks it, that's a real fail, not a
+			// runner error.
+			synthGot, envReason, terminate := reexecuteRunReasonToResult(got, runReason, runErr)
+			if terminate {
+				return []Reason{envReason}
 			}
+			got = synthGot
 
-			actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
-			if actual == expected {
-				return nil
-			}
-			if expected == outcomeFail &&
-				actual == outcomeUnchanged &&
-				discriminatingStrategies[m.Strategy] &&
-				!stepBodiesEqual(baseline.Action, mutAction) {
-				return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, "source")}
-			}
-			return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
+			return classifyMutationOutcomeReasons(
+				idx, m, branch, got, baseline.Result, b.Diff,
+				expected, "source", baseline.Action, mutAction)
 		}()
 	})
 	return reasons, true
@@ -843,15 +852,7 @@ func runOneReexecuteMutation(e *Entry, b mutationBaseline, m Mutation, idx int, 
 // M04-F87 for the full safety contract; F93 widened the gate.
 func runOneReexecuteMutationShared(e *Entry, b mutationBaseline, m Mutation, idx int, cas *cassette.Cassette) ([]Reason, bool) {
 	if isCassetteResponseStrategy(m.Strategy) {
-		return []Reason{{
-			Code: "mutation_strategy_unsupported",
-			Message: fmt.Sprintf(
-				"mutation #%d strategy %q targets a cassette response, but reexecute "+
-					"mode has no HTTP responses to perturb. Use mutate_fixture / "+
-					"set_literal_value / swap_* / remove_kwarg / drop_flag at "+
-					"reexecute tier",
-				idx+1, m.Strategy),
-		}}, false
+		return cassetteResponseAtTierRejection(idx, m.Strategy, "reexecute mode"), false
 	}
 	strat, ok := resolveMutationStrategy(m)
 	if !ok {
@@ -882,17 +883,9 @@ func runOneReexecuteMutationShared(e *Entry, b mutationBaseline, m Mutation, idx
 			got = synthesizeMutationCrash(runErr)
 		}
 
-		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
-		if actual == expected {
-			return nil
-		}
-		if expected == outcomeFail &&
-			actual == outcomeUnchanged &&
-			discriminatingStrategies[m.Strategy] &&
-			!stepBodiesEqual(baseline.Action, mutAction) {
-			return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, "source")}
-		}
-		return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
+		return classifyMutationOutcomeReasons(
+			idx, m, branch, got, baseline.Result, b.Diff,
+			expected, "source", baseline.Action, mutAction)
 	})
 	return reasons, true
 }

@@ -635,6 +635,99 @@ func mutationOutcomeMismatchReason(idx int, m Mutation, branch branchKind, expec
 	}
 }
 
+// classifyMutationOutcomeReasons compares a mutated branch's ExecResult
+// against the declared expectation and returns the reason list every per-tier
+// runOneMutation* dispatcher emits at the end of its inner loop. Pre-F95 the
+// same 5-line block (`classifyOutcome → if actual==expected return nil →
+// did-not-discriminate hint → outcome mismatch`) was duplicated across five
+// tier-specific dispatchers (function/python in mutate.go, integration replay
+// in integration.go, integration reexecute and its share-state variant in
+// reexecute.go, unit-tier subprocess in unit.go).
+//
+// scope selects the did-not-discriminate variant:
+//
+//	"source"           — source-mutating strategy rewrote the action source.
+//	                     Hint fires when stepBodiesEqual(baseline.Action,
+//	                     mutAction) is false (i.e. the rewrite did land but
+//	                     produced no behavioural change).
+//	"cassette_response" — cassette-response perturbation. Hint fires
+//	                     unconditionally on (expected=fail, actual=unchanged)
+//	                     because the perturbation is byte-applied to the
+//	                     cassette clone before the branch re-runs.
+//
+// baselineAction / mutAction are consulted only for scope=="source"; callers
+// at cassette-response tier may pass nil for both. The discriminating-strategy
+// gate (discriminatingStrategies[m.Strategy]) and the expected==fail /
+// actual==unchanged gate are folded in here so each callsite is a single line.
+func classifyMutationOutcomeReasons(
+	idx int, m Mutation, branch branchKind,
+	got, baselineResult runner.ExecResult, diff map[string]any,
+	expected mutationOutcome, scope string,
+	baselineAction, mutAction []runner.Step,
+) []Reason {
+	actual := classifyOutcome(branch, got, baselineResult, diff)
+	if actual == expected {
+		return nil
+	}
+	if expected == outcomeFail && actual == outcomeUnchanged && discriminatingStrategies[m.Strategy] {
+		switch scope {
+		case "cassette_response":
+			return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, scope)}
+		case "source":
+			if !stepBodiesEqual(baselineAction, mutAction) {
+				return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, scope)}
+			}
+		}
+	}
+	return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
+}
+
+// reexecuteRunReasonToResult folds a per-mutation run reason into the
+// outcome-classification path. Environmental failures (timeout / missing
+// interpreter / missing host tool) surface as mutation_runner_error so the
+// caller short-circuits with a typed Reason; non-env failures (setup_script
+// crash, in-band step error already folded into ExecResult.Raised by the
+// driver) synthesize a raised ExecResult that classifyMutationOutcomeReasons
+// will route through outcomeFail. The pre-F95 shape lived inline at three
+// sites (reexecute.go's isolated + shared paths and unit.go's subprocess
+// dispatcher).
+//
+// got is returned unchanged on (nil, true) so callers don't have to shadow
+// it. Returns (synthesizedResult, runnerErrReason, terminate) — when
+// terminate==true the caller returns []Reason{runnerErrReason} immediately;
+// otherwise the caller continues with classifyMutationOutcomeReasons using
+// synthesizedResult.
+func reexecuteRunReasonToResult(got runner.ExecResult, runReason *Reason, runErr error) (runner.ExecResult, Reason, bool) {
+	if runReason == nil {
+		return got, Reason{}, false
+	}
+	if runErr != nil && isEnvErr(runErr) {
+		return got, mutationRunnerErrorReasonMsg(runReason.Message), true
+	}
+	return synthesizeMutationCrashMessage(runReason.Message), Reason{}, false
+}
+
+// cassetteResponseAtTierRejection builds the typed "cassette-response
+// mutation strategy is not supported at this tier" rejection emitted by
+// runOneReexecuteMutation, runOneReexecuteMutationShared, and
+// runOneUnitSubprocessMutation. Each tier formerly hand-rolled the same
+// 11-line Reason block; centralising it here means a future tier rejection
+// (or a wording tweak) lives in one place.
+//
+// tierName is the human-readable tier label spliced into the message
+// ("reexecute mode", "unit-tier subprocess").
+func cassetteResponseAtTierRejection(idx int, strategyName, tierName string) []Reason {
+	return []Reason{{
+		Code: "mutation_strategy_unsupported",
+		Message: fmt.Sprintf(
+			"mutation #%d strategy %q targets a cassette response, but %s "+
+				"has no HTTP responses to perturb. Use mutate_fixture / "+
+				"set_literal_value / swap_* / remove_kwarg / drop_flag at "+
+				"this tier",
+			idx+1, strategyName, tierName),
+	}}
+}
+
 // mutationDidNotDiscriminateReason builds the non-discrimination hint Reason
 // for both the source-mutation and cassette-response forms. Caller is
 // responsible for the gating check (expected == outcomeFail, actual ==
@@ -706,26 +799,9 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			got = synthesizeMutationCrash(err)
 		}
 
-		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
-		if actual == expected {
-			return nil
-		}
-		// Diagnostic refinement: when a source-mutating strategy
-		// rewrote the action (so the regex / strings.ReplaceAll did
-		// match) but the program's observable behaviour was
-		// identical, the submitter picked a token that doesn't
-		// actually discriminate — typically a local identifier
-		// that's renamed consistently throughout, or a call that
-		// has the same return value as the swap target. Replace
-		// the generic mutation_outcome_mismatch reason with a
-		// targeted hint so the seed author knows what to fix.
-		if expected == outcomeFail &&
-			actual == outcomeUnchanged &&
-			discriminatingStrategies[m.Strategy] &&
-			!stepBodiesEqual(baseline.Action, mutAction) {
-			return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, "source")}
-		}
-		return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
+		return classifyMutationOutcomeReasons(
+			idx, m, branch, got, baseline.Result, b.Diff,
+			expected, "source", baseline.Action, mutAction)
 	})
 	return reasons, true
 }

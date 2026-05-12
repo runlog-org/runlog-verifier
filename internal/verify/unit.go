@@ -103,12 +103,8 @@ func runUnit(e *Entry) Result {
 	}
 
 	var reasons []Reason
-	reasons = append(reasons, matchOutcome(branchFailed, failedRes, e.Verification.Differential)...)
-	reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
-	reasons = append(reasons, matchActionPlanNodeTiming("failed_approach", e.FailedApproach.Assertion, failedRes)...)
-	reasons = append(reasons, matchActionPlanNodeTiming("working_approach", e.WorkingApproach.Assertion, workingRes)...)
-	reasons = append(reasons, matchActionOutputPattern("failed_approach", e.FailedApproach.Assertion, failedRes)...)
-	reasons = append(reasons, matchActionOutputPattern("working_approach", e.WorkingApproach.Assertion, workingRes)...)
+	reasons = append(reasons, matchBranchOutcome(branchFailed, failedRes, e.FailedApproach.Assertion, e.Verification.Differential)...)
+	reasons = append(reasons, matchBranchOutcome(branchWorking, workingRes, e.WorkingApproach.Assertion, e.Verification.Differential)...)
 
 	if len(reasons) > 0 {
 		return rejectedReasons(res, reasons)
@@ -266,12 +262,8 @@ func runUnitSubprocess(e *Entry) Result {
 	defer cleanupUnitSubprocessSandbox(workingDriver)
 
 	var reasons []Reason
-	reasons = append(reasons, matchOutcome(branchFailed, failedRes, e.Verification.Differential)...)
-	reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
-	reasons = append(reasons, matchActionPlanNodeTiming("failed_approach", e.FailedApproach.Assertion, failedRes)...)
-	reasons = append(reasons, matchActionPlanNodeTiming("working_approach", e.WorkingApproach.Assertion, workingRes)...)
-	reasons = append(reasons, matchActionOutputPattern("failed_approach", e.FailedApproach.Assertion, failedRes)...)
-	reasons = append(reasons, matchActionOutputPattern("working_approach", e.WorkingApproach.Assertion, workingRes)...)
+	reasons = append(reasons, matchBranchOutcome(branchFailed, failedRes, e.FailedApproach.Assertion, e.Verification.Differential)...)
+	reasons = append(reasons, matchBranchOutcome(branchWorking, workingRes, e.WorkingApproach.Assertion, e.Verification.Differential)...)
 	if len(reasons) > 0 {
 		return rejectedReasons(res, reasons)
 	}
@@ -348,18 +340,9 @@ func cleanupUnitSubprocessSandbox(driver runner.SubprocessDriver) {
 // unit-tier subprocess emits. Mirrors reexecuteRunErrorCode but uses
 // `input_invalid_name` (no cassette to scope the error to) and reuses the rest
 // of the error→code mapping wholesale so behaviour stays uniform across tiers.
+// Delegates to subprocessDriverErrorCode for the shared sentinel arms.
 func unitSubprocessRunErrorCode(err error, defaultCode string) string {
-	switch {
-	case errors.Is(err, runner.ErrInputInvalidName):
-		return "input_invalid_name"
-	case errors.Is(err, runner.ErrInterpreterMissing):
-		return "runtime_unavailable"
-	case errors.Is(err, runner.ErrTimeout):
-		return "branch_timeout"
-	case errors.Is(err, runner.ErrLanguageUnsupported), errors.Is(err, runner.ErrSubprocessTool):
-		return "language_not_yet_implemented"
-	}
-	return defaultCode
+	return subprocessDriverErrorCode(err, defaultCode, "input_invalid_name")
 }
 
 // runUnitSubprocessMutations applies each declared mutation in a fresh
@@ -378,14 +361,7 @@ func runUnitSubprocessMutations(e *Entry, b mutationBaseline, tool string) ([]Re
 // before the mutated action.
 func runOneUnitSubprocessMutation(b mutationBaseline, m Mutation, idx int, tool string) ([]Reason, bool) {
 	if isCassetteResponseStrategy(m.Strategy) {
-		return []Reason{{
-			Code: "mutation_strategy_unsupported",
-			Message: fmt.Sprintf(
-				"mutation #%d strategy %q targets a cassette response, but unit-tier "+
-					"subprocess has no HTTP responses to perturb. Use mutate_fixture / "+
-					"set_literal_value / swap_* / remove_kwarg / drop_flag at this tier",
-				idx+1, m.Strategy),
-		}}, false
+		return cassetteResponseAtTierRejection(idx, m.Strategy, "unit-tier subprocess"), false
 	}
 	strat, ok := resolveMutationStrategy(m)
 	if !ok {
@@ -407,24 +383,15 @@ func runOneUnitSubprocessMutation(b mutationBaseline, m Mutation, idx int, tool 
 				tool, mutSetup, mutAction, mutInputs, b.Timeout)
 			defer cleanupUnitSubprocessSandbox(mutDriver)
 
-			if runReason != nil {
-				if runErr != nil && isEnvErr(runErr) {
-					return []Reason{mutationRunnerErrorReasonMsg(runReason.Message)}
-				}
-				got = synthesizeMutationCrashMessage(runReason.Message)
+			synthGot, envReason, terminate := reexecuteRunReasonToResult(got, runReason, runErr)
+			if terminate {
+				return []Reason{envReason}
 			}
+			got = synthGot
 
-			actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
-			if actual == expected {
-				return nil
-			}
-			if expected == outcomeFail &&
-				actual == outcomeUnchanged &&
-				discriminatingStrategies[m.Strategy] &&
-				!stepBodiesEqual(baseline.Action, mutAction) {
-				return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, "source")}
-			}
-			return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
+			return classifyMutationOutcomeReasons(
+				idx, m, branch, got, baseline.Result, b.Diff,
+				expected, "source", baseline.Action, mutAction)
 		}()
 	})
 	return reasons, true

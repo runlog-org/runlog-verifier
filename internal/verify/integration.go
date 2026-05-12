@@ -215,24 +215,16 @@ func runIntegration(e *Entry) Result {
 	}
 
 	// ── Outcome matching ──────────────────────────────────────────────
+	// Replay mode allows a branch to be omitted (a cassette may declare only
+	// a working_approach_replay_sequence), so each branch is only matched
+	// when it actually ran. This is the only tier that runs per-branch
+	// conditionally — unit and reexecute always run both branches.
 	var reasons []Reason
 	if failedHasRun {
-		reasons = append(reasons, matchOutcome(branchFailed, failedRes, e.Verification.Differential)...)
+		reasons = append(reasons, matchBranchOutcome(branchFailed, failedRes, e.FailedApproach.Assertion, e.Verification.Differential)...)
 	}
 	if workingHasRun {
-		reasons = append(reasons, matchOutcome(branchWorking, workingRes, e.Verification.Differential)...)
-	}
-	if failedHasRun {
-		reasons = append(reasons, matchActionPlanNodeTiming("failed_approach", e.FailedApproach.Assertion, failedRes)...)
-	}
-	if workingHasRun {
-		reasons = append(reasons, matchActionPlanNodeTiming("working_approach", e.WorkingApproach.Assertion, workingRes)...)
-	}
-	if failedHasRun {
-		reasons = append(reasons, matchActionOutputPattern("failed_approach", e.FailedApproach.Assertion, failedRes)...)
-	}
-	if workingHasRun {
-		reasons = append(reasons, matchActionOutputPattern("working_approach", e.WorkingApproach.Assertion, workingRes)...)
+		reasons = append(reasons, matchBranchOutcome(branchWorking, workingRes, e.WorkingApproach.Assertion, e.Verification.Differential)...)
 	}
 	if len(reasons) > 0 {
 		return rejectedReasons(res, reasons)
@@ -540,20 +532,20 @@ func runOneIntegrationMutation(e *Entry, b mutationBaseline, m Mutation, idx int
 			got = synthesizeMutationCrash(err)
 		}
 
-		actual := classifyOutcome(branch, got, baseline.Result, b.Diff)
-		if actual == expected {
-			return nil
+		// F22: cassette-response mutations get the perturbation-tier
+		// "did not discriminate" hint (the perturbation byte-applied
+		// but the action ignored it); everything else uses the source
+		// scope where the hint additionally requires the rewrite to
+		// have changed the action body. classifyMutationOutcomeReasons
+		// folds the gating logic for both shapes; baselineAction /
+		// mutAction are inert for the cassette_response scope.
+		scope := "source"
+		if cassetteResponse {
+			scope = "cassette_response"
 		}
-		// F22: mirror the F21 hint for cassette-response mutations.
-		// A perturbed cassette that produces no behavioural change is
-		// integration-tier theatre — the action ignored the response
-		// field the submitter perturbed.
-		if cassetteResponse &&
-			expected == outcomeFail &&
-			actual == outcomeUnchanged {
-			return []Reason{mutationDidNotDiscriminateReason(idx, m, branch, "cassette_response")}
-		}
-		return []Reason{mutationOutcomeMismatchReason(idx, m, branch, expected, actual)}
+		return classifyMutationOutcomeReasons(
+			idx, m, branch, got, baseline.Result, b.Diff,
+			expected, scope, baseline.Action, mutAction)
 	})
 	return reasons, true
 }

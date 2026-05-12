@@ -11,6 +11,28 @@ import (
 	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
 
+// matchBranchOutcome is the all-in-one per-branch outcome check used by every
+// tier orchestrator (unit, unit-tier subprocess, integration replay, integration
+// reexecute). Composes the three independent per-branch outcome checks —
+// differential matching (matchOutcome), action-level planning-time
+// thresholds (matchActionPlanNodeTiming), and action-level output-pattern
+// assertions (matchActionOutputPattern) — into a single call so each tier's
+// orchestrator only loops over branches once.
+//
+// Pre-F95 the three calls + per-branch append shape was duplicated across
+// runUnit / runIntegration / runReexecute / runUnitSubprocess as six near-
+// identical lines (three calls × two branches). Centralising here also
+// guarantees the call order stays uniform — important for stable Reason
+// ordering when an entry violates multiple per-branch checks at once.
+func matchBranchOutcome(k branchKind, got runner.ExecResult, a Assertion, diff map[string]any) []Reason {
+	branch := k.String()
+	var out []Reason
+	out = append(out, matchOutcome(k, got, diff)...)
+	out = append(out, matchActionPlanNodeTiming(branch, a, got)...)
+	out = append(out, matchActionOutputPattern(branch, a, got)...)
+	return out
+}
+
 // matchOutcome compares one branch's ExecResult against the relevant
 // differential keys. Returns the (possibly empty) list of mismatch reasons.
 //
