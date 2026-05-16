@@ -26,9 +26,17 @@ jobs:
 
       # runlog-schema is a regular Go module dependency pinned in
       # go.mod ([F28]); proxy.golang.org serves it. No sibling checkout.
+      #
+      # Pin an EXACT patch version, not the "1.26" minor constraint.
+      # actions/setup-go resolves a bare minor to the latest available
+      # 1.26.x patch *at run time*, so the same source built weeks apart
+      # picks up a newer toolchain and yields a different binary. That
+      # cross-run drift broke `brew install` on 2026-05-16 [T99]. The
+      # exact pin is what makes cross-run reproduction real (see
+      # RELEASING.md). Bumping it is a deliberate, release-noted change.
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.0"
           cache: true
 
       - name: Resolve version + commit
@@ -121,10 +129,49 @@ jobs:
           path: dist/release/*
           if-no-files-found: error
 
-      # Only create a Release on a real tag push. workflow_dispatch is a
+      # A release run is effectively ONE-SHOT for asset publication.
+      # Re-running this workflow on a tag whose Release already carries
+      # assets must NOT re-upload over them: across runs, freshly-built
+      # binaries are not guaranteed bit-identical (toolchain drift —
+      # mitigated by the exact Go pin above but still not promised), and
+      # clobbering desyncs the published binaries from the
+      # homebrew-runlog formula's pinned sha256 and the original
+      # SHA256SUMS. That is exactly what broke `brew install` on
+      # 2026-05-16 [T100].
+      #
+      # We *skip* (not fail) so a rerun can still recover the downstream
+      # `update-tap` job (the documented recovery path in RELEASING.md
+      # when only the tap bump failed). update-tap consumes this run's
+      # rebuilt artifact, which — with the pinned toolchain and the same
+      # commit — is bit-identical to the originally published assets, so
+      # letting it proceed is safe and idempotent.
+      - name: Check for already-published assets
+        id: published
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          exists=false
+          if asset_count=$(gh release view "$TAG" --repo "$REPO" \
+                --json assets --jq '.assets | length' 2>/dev/null); then
+            if [ "${asset_count:-0}" -gt 0 ]; then
+              exists=true
+              echo "::warning::Release $TAG already has ${asset_count} published" \
+                   "asset(s); skipping Release creation to avoid clobbering them." \
+                   "A release run is one-shot — to re-release, cut a new tag" \
+                   "(see RELEASING.md). update-tap will still run for recovery."
+            fi
+          fi
+          echo "exists=${exists}" >> "$GITHUB_OUTPUT"
+
+      # Only create a Release on a real tag push, and only if assets are
+      # not already published (guard above). workflow_dispatch is a
       # smoke run — artifacts above are enough to inspect.
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && steps.published.outputs.exists != 'true'
         uses: softprops/action-gh-release@v3
         with:
           draft: ${{ steps.meta.outputs.draft == 'true' }}
