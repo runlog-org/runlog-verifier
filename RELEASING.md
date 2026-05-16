@@ -3,9 +3,33 @@
 Releases are cut by pushing a version tag. The
 [`release`](.github/workflows/release.yml) workflow does the rest:
 cross-compiles four binaries with the same reproducibility flags as
-`make build`, checks each one builds byte-identically twice, generates
-a `SHA256SUMS` manifest, and creates a GitHub Release with the
-artefacts attached.
+`make build`, builds each one twice **within the run** and fails fast
+if the pair diverges, generates a `SHA256SUMS` manifest, and creates a
+GitHub Release with the artefacts attached.
+
+> **Reproducibility — scope.** The twice-and-compare check proves
+> *intra-run* determinism: the same toolchain, same source, same run
+> yields the same bytes. *Cross-run* reproduction (rebuilding the same
+> tag weeks later and getting identical hashes) holds only because the
+> workflow pins an **exact** Go patch version
+> (`actions/setup-go` `go-version: "1.26.0"`) rather than the floating
+> `"1.26"` minor. With a floating minor, `setup-go` silently upgrades
+> to the latest patch at run time and the binary changes — this is what
+> broke `brew install` on 2026-05-16. Cross-run reproduction is
+> therefore guaranteed *only against the exact pinned toolchain*;
+> bumping that pin is a deliberate change and should be called out in
+> the release notes.
+
+> **A release run is one-shot for asset publication.** Re-running the
+> `release` workflow on a tag whose Release already carries assets
+> **skips** the Release-creation step rather than re-uploading over the
+> originals — preventing the desync of published assets from the
+> `homebrew-runlog` formula's pinned `sha256` and the original
+> `SHA256SUMS`. The downstream `update-tap` job still runs, so a rerun
+> remains a valid recovery path when only the tap bump failed (see
+> [Homebrew tap auto-bump](#homebrew-tap-auto-bump)). To publish
+> *changed* binaries you must cut a **new tag** — a rerun will never
+> replace already-published assets.
 
 ## Cut a release
 
@@ -54,13 +78,21 @@ matches its source by re-running the same build and comparing hashes:
 
 To rebuild from source and compare:
 
+    # Use the EXACT Go toolchain the release workflow pinned
+    # (go-version in .github/workflows/release.yml — currently 1.26.0).
+    # A different patch release will produce different bytes; that is a
+    # toolchain mismatch, not a tampered binary.
+    go version                       # must match the pinned version
     git checkout v0.2.0
     make release
     diff <(sort -k2 dist/SHA256SUMS) <(sort -k2 /path/to/downloaded/SHA256SUMS)
 
 Identical hashes prove the published binary was built from this source
-with the published toolchain — the trust assumption documented in
-`docs/03-verification-and-provenance.md` §5.4.
+with the pinned toolchain — the trust assumption documented in
+`docs/03-verification-and-provenance.md` §5.4. A hash *mismatch* means
+either the source/toolchain differs or the asset was altered; check
+your local `go version` against the pinned version before suspecting
+tampering.
 
 ## Install via `.deb` (Linux)
 
