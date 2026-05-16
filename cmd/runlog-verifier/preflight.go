@@ -20,6 +20,41 @@ const pubkeyGetPath = "/v1/pubkey"
 // http.Client with the registerHTTPTimeout (shared with register.go).
 var preflightHTTPClient *http.Client
 
+// preflightClient resolves the test-injected preflightHTTPClient when set,
+// else a fresh http.Client bounded by registerHTTPTimeout. Mirrors
+// register.go's httpClient() so the nil-check + timeout-construction
+// pattern lives in exactly one place per subcommand seam instead of being
+// hand-rolled inside checkServerPubkey.
+func preflightClient() *http.Client {
+	if preflightHTTPClient != nil {
+		return preflightHTTPClient
+	}
+	return &http.Client{Timeout: registerHTTPTimeout}
+}
+
+// httpExchange runs req through client and returns the response together
+// with its body read under the shared maxResponseBytes cap. It always
+// closes resp.Body before returning, so callers get a fully-consumed
+// response they can inspect without worrying about exhaust order.
+//
+// Every register/preflight HTTP call site (kickoff, status poll, pubkey
+// upload, pre-flight pubkey GET) previously hand-rolled the identical
+// client.Do → defer Close → io.ReadAll(http.MaxBytesReader(...)) →
+// read-error triple. Centralising it keeps the byte cap and the
+// body-lifecycle handling provably uniform across all four.
+func httpExchange(client *http.Client, req *http.Request) (*http.Response, []byte, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(http.MaxBytesReader(nil, resp.Body, maxResponseBytes))
+	if err != nil {
+		return resp, nil, err
+	}
+	return resp, body, nil
+}
+
 // resolveServerURL returns the server base URL using the cascade shared
 // by the register and verify subcommands: explicit override >
 // $RUNLOG_API_URL > defaultRegisterServer. Returned value has any
@@ -62,17 +97,11 @@ func checkServerPubkey(server, apiKey string, localPub ed25519.PublicKey) error 
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
 
-	client := preflightHTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: registerHTTPTimeout}
-	}
-	resp, err := client.Do(req)
+	resp, body, err := httpExchange(preflightClient(), req)
 	if err != nil {
-		return fmt.Errorf("could not reach %s: %v", server, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(http.MaxBytesReader(nil, resp.Body, maxResponseBytes))
-	if err != nil {
+		if resp == nil {
+			return fmt.Errorf("could not reach %s: %v", server, err)
+		}
 		return fmt.Errorf("read pre-flight response body: %v", err)
 	}
 

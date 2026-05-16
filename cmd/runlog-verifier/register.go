@@ -276,15 +276,13 @@ func postRegisterCLI(server, email string, stderr io.Writer) (kickoffResponse, i
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient().Do(req)
+	resp, body, err := httpExchange(httpClient(), req)
 	if err != nil {
-		fmt.Fprintf(stderr, "register: could not reach %s: %v\n", server, err)
-		return kickoffResponse{}, registerExitNet
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(http.MaxBytesReader(nil, resp.Body, maxResponseBytes))
-	if err != nil {
-		fmt.Fprintf(stderr, "register: read kickoff response body: %v\n", err)
+		if resp == nil {
+			fmt.Fprintf(stderr, "register: could not reach %s: %v\n", server, err)
+		} else {
+			fmt.Fprintf(stderr, "register: read kickoff response body: %v\n", err)
+		}
 		return kickoffResponse{}, registerExitNet
 	}
 
@@ -413,15 +411,13 @@ func pollRegisterStatus(server, token string, expiresInSeconds int, stderr io.Wr
 			return statusResponse{}, registerExitNet
 		}
 		req.Header.Set("Accept", "application/json")
-		resp, err := client.Do(req)
+		resp, body, err := httpExchange(client, req)
 		if err != nil {
-			fmt.Fprintf(stderr, "\nregister: could not reach %s: %v\n", server, err)
-			return statusResponse{}, registerExitNet
-		}
-		body, readErr := io.ReadAll(http.MaxBytesReader(nil, resp.Body, maxResponseBytes))
-		_ = resp.Body.Close()
-		if readErr != nil {
-			fmt.Fprintf(stderr, "\nregister: read status body: %v\n", readErr)
+			if resp == nil {
+				fmt.Fprintf(stderr, "\nregister: could not reach %s: %v\n", server, err)
+			} else {
+				fmt.Fprintf(stderr, "\nregister: read status body: %v\n", err)
+			}
 			return statusResponse{}, registerExitNet
 		}
 
@@ -645,13 +641,11 @@ func postRegisterPubkey(endpoint, apiKey, pubB64 string) (*http.Response, []byte
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient().Do(req)
+	resp, body, err := httpExchange(httpClient(), req)
 	if err != nil {
-		return nil, nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(http.MaxBytesReader(nil, resp.Body, maxResponseBytes))
-	if err != nil {
+		if resp == nil {
+			return nil, nil, err
+		}
 		return nil, nil, fmt.Errorf("read response body: %w", err)
 	}
 	return resp, body, nil
