@@ -121,6 +121,18 @@ func printVersion() {
 	fmt.Printf("runlog-verifier %s (commit %s)\n", Version, Commit)
 }
 
+// encodeJSON writes v to w as 2-space-indented JSON followed by a
+// newline. Every subcommand emits its result envelope this way (verify,
+// keygen, register); centralising the encoder construction keeps the
+// indent convention identical and removes the hand-rolled
+// NewEncoder+SetIndent+Encode triple from each call site. Callers wrap
+// the returned error with their own subcommand-prefixed message.
+func encodeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
 // readEntryFile reads up to verify.MaxEntryBytes+1 bytes from path so we can
 // detect — and reject — entries that exceed the cap without ever materialising
 // an unbounded byte slice. yaml.Unmarshal of a multi-MiB file is a trivial
@@ -220,7 +232,7 @@ func runVerify(args []string) int {
 				"Get a key at https://runlog.org/register.")
 		return 1
 	}
-	server := resolvePreflightServer(*serverFlag)
+	server := resolveServerURL(*serverFlag)
 	if err := checkServerPubkey(server, apiKey, pub); err != nil {
 		fmt.Fprintf(os.Stderr, "verify: %v\n", err)
 		return 2
@@ -255,9 +267,7 @@ func runVerify(args []string) int {
 		"public_key":  signed.PublicKey,
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(out); err != nil {
+	if err := encodeJSON(os.Stdout, out); err != nil {
 		fmt.Fprintf(os.Stderr, "verify: encode output: %v\n", err)
 		return 2
 	}
@@ -298,9 +308,7 @@ func runKeygen(args []string) int {
 		"note":            "DEV ONLY — does not touch ~/.runlog/key. Use `register` for production.",
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(out); err != nil {
+	if err := encodeJSON(os.Stdout, out); err != nil {
 		fmt.Fprintf(os.Stderr, "keygen: encode output: %v\n", err)
 		return 2
 	}

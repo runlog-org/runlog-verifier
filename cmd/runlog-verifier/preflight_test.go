@@ -260,9 +260,9 @@ func TestResolvePreflightServer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RUNLOG_API_URL", tt.env)
-			got := resolvePreflightServer(tt.override)
+			got := resolveServerURL(tt.override)
 			if got != tt.want {
-				t.Errorf("resolvePreflightServer(%q) with env=%q = %q, want %q",
+				t.Errorf("resolveServerURL(%q) with env=%q = %q, want %q",
 					tt.override, tt.env, got, tt.want)
 			}
 		})

@@ -13,10 +13,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/runlog-org/runlog-verifier/internal/clientconfig"
@@ -102,15 +100,10 @@ func runRegister(args []string, stdout, stderr io.Writer) int {
 		return registerExitUser
 	}
 
-	server := *serverFlag
-	if server == "" {
-		if env := os.Getenv("RUNLOG_API_URL"); env != "" {
-			server = env
-		} else {
-			server = defaultRegisterServer
-		}
-	}
-	server = strings.TrimRight(server, "/")
+	// Same override > $RUNLOG_API_URL > defaultRegisterServer cascade the
+	// verify subcommand uses for its pre-flight; share the one resolver
+	// rather than hand-rolling it in two places.
+	server := resolveServerURL(*serverFlag)
 
 	// Validate the base server URL once via a probe parse of the kickoff
 	// endpoint; the same scheme/host applies to every subsequent call so
@@ -220,9 +213,7 @@ func runRegister(args []string, stdout, stderr io.Writer) int {
 			"key_path":    keyPath,
 			"config_path": configPath,
 		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(out); err != nil {
+		if err := encodeJSON(stdout, out); err != nil {
 			fmt.Fprintf(stderr, "register: encode output: %v\n", err)
 			return registerExitNet
 		}
@@ -340,16 +331,9 @@ func postRegisterCLI(server, email string, stderr io.Writer) (kickoffResponse, i
 		return kickoffResponse{}, registerExitUser
 
 	case http.StatusTooManyRequests:
-		var withRetry struct {
-			Error struct {
-				RetryAfterSeconds int `json:"retry_after_seconds"`
-			} `json:"error"`
-		}
-		_ = json.Unmarshal(body, &withRetry)
-		if withRetry.Error.RetryAfterSeconds > 0 {
+		if secs := retryAfterSeconds(body); secs > 0 {
 			fmt.Fprintf(stderr,
-				"register: rate-limited by server, retry in %ds\n",
-				withRetry.Error.RetryAfterSeconds)
+				"register: rate-limited by server, retry in %ds\n", secs)
 		} else {
 			fmt.Fprintln(stderr, "register: rate-limited by server, retry shortly")
 		}
@@ -492,13 +476,7 @@ func pollRegisterStatus(server, token string, expiresInSeconds int, stderr io.Wr
 			return statusResponse{}, registerExitUser
 
 		case http.StatusTooManyRequests:
-			var withRetry struct {
-				Error struct {
-					RetryAfterSeconds int `json:"retry_after_seconds"`
-				} `json:"error"`
-			}
-			_ = json.Unmarshal(body, &withRetry)
-			wait := time.Duration(withRetry.Error.RetryAfterSeconds) * time.Second
+			wait := time.Duration(retryAfterSeconds(body)) * time.Second
 			if wait <= 0 {
 				wait = 5 * time.Second
 			}
@@ -694,6 +672,23 @@ func serverErrorType(body []byte) (string, string) {
 		return "", ""
 	}
 	return envelope.Error.Type, envelope.Error.Message
+}
+
+// retryAfterSeconds extracts {"error": {"retry_after_seconds": N}} from a
+// 429 response body. Returns 0 when the field is absent or the body does
+// not parse — callers treat a non-positive value as "no server-supplied
+// hint" and fall back to their own default cadence. Shared by every 429
+// arm (kickoff, status poll, pre-flight) so the envelope shape lives once.
+func retryAfterSeconds(body []byte) int {
+	var withRetry struct {
+		Error struct {
+			RetryAfterSeconds int `json:"retry_after_seconds"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &withRetry); err != nil {
+		return 0
+	}
+	return withRetry.Error.RetryAfterSeconds
 }
 
 // pubFingerprint returns the first 12 hex chars of sha256(pub) — short

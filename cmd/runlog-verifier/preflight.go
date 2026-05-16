@@ -20,10 +20,11 @@ const pubkeyGetPath = "/v1/pubkey"
 // http.Client with the registerHTTPTimeout (shared with register.go).
 var preflightHTTPClient *http.Client
 
-// resolvePreflightServer returns the server base URL using the same
-// cascade as the register subcommand: explicit override > $RUNLOG_API_URL
-// > defaultRegisterServer. Returned value has any trailing slash trimmed.
-func resolvePreflightServer(override string) string {
+// resolveServerURL returns the server base URL using the cascade shared
+// by the register and verify subcommands: explicit override >
+// $RUNLOG_API_URL > defaultRegisterServer. Returned value has any
+// trailing slash trimmed.
+func resolveServerURL(override string) string {
 	server := override
 	if server == "" {
 		if env := os.Getenv("RUNLOG_API_URL"); env != "" {
@@ -108,14 +109,8 @@ func checkServerPubkey(server, apiKey string, localPub ed25519.PublicKey) error 
 		return fmt.Errorf("API key rejected by server (%s) — check RUNLOG_API_KEY", errType)
 
 	case http.StatusTooManyRequests:
-		var withRetry struct {
-			Error struct {
-				RetryAfterSeconds int `json:"retry_after_seconds"`
-			} `json:"error"`
-		}
-		_ = json.Unmarshal(body, &withRetry)
-		if withRetry.Error.RetryAfterSeconds > 0 {
-			return fmt.Errorf("rate-limited by server, retry in %ds", withRetry.Error.RetryAfterSeconds)
+		if secs := retryAfterSeconds(body); secs > 0 {
+			return fmt.Errorf("rate-limited by server, retry in %ds", secs)
 		}
 		return errors.New("rate-limited by server, retry shortly")
 

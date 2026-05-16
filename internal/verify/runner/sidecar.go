@@ -321,8 +321,7 @@ func (h *SidecarHandle) waitForReady(rw ReadyWhen, stderrRE *regexp.Regexp, matc
 			case <-matched:
 				return nil
 			case <-h.waitDone:
-				return fmt.Errorf("%w: %s: process exited before ready (err=%v, stderr=%q)",
-					ErrSidecarStartup, h.Name, h.waitErr, redactStderr(h.StderrTail()))
+				return h.exitedBeforeReadyErr()
 			case <-deadline.C:
 				return fmt.Errorf("%w: %s: stderr_regex %q not matched in %s",
 					ErrSidecarReadyTimeout, h.Name, rw.StderrRegex, timeout)
@@ -337,8 +336,7 @@ func (h *SidecarHandle) waitForReady(rw ReadyWhen, stderrRE *regexp.Regexp, matc
 			}
 			select {
 			case <-h.waitDone:
-				return fmt.Errorf("%w: %s: process exited before ready (err=%v, stderr=%q)",
-					ErrSidecarStartup, h.Name, h.waitErr, redactStderr(h.StderrTail()))
+				return h.exitedBeforeReadyErr()
 			case <-deadline.C:
 				return fmt.Errorf("%w: %s: path %q did not exist in %s",
 					ErrSidecarReadyTimeout, h.Name, rw.PathExists, timeout)
@@ -354,6 +352,16 @@ func (h *SidecarHandle) waitForReady(rw ReadyWhen, stderrRE *regexp.Regexp, matc
 	}
 }
 
+// exitedBeforeReadyErr is the single source of the "process died during
+// ready detection" error. Every ready_when arm (stderr_regex, path_exists,
+// delay_seconds, fallback) reports an early exit identically — wrapping
+// ErrSidecarStartup with the wait error and the redacted stderr tail — so
+// the construction lives here once instead of being hand-rolled per arm.
+func (h *SidecarHandle) exitedBeforeReadyErr() error {
+	return fmt.Errorf("%w: %s: process exited before ready (err=%v, stderr=%q)",
+		ErrSidecarStartup, h.Name, h.waitErr, redactStderr(h.StderrTail()))
+}
+
 // sleepOrExit sleeps for d, returning ErrSidecarStartup if the process
 // dies before the sleep finishes. Used by the delay_seconds and
 // fallback ready_when paths.
@@ -362,8 +370,7 @@ func (h *SidecarHandle) sleepOrExit(d time.Duration) error {
 	defer t.Stop()
 	select {
 	case <-h.waitDone:
-		return fmt.Errorf("%w: %s: process exited before ready (err=%v, stderr=%q)",
-			ErrSidecarStartup, h.Name, h.waitErr, redactStderr(h.StderrTail()))
+		return h.exitedBeforeReadyErr()
 	case <-t.C:
 		return nil
 	}
