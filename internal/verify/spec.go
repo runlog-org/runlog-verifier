@@ -462,24 +462,49 @@ func matchPlanNodeTiming(branch string, got runner.ExecResult, gtSpec any, hasGt
 		return out
 	}
 
+	return append(out, planningTimeGateReasons(
+		branch, got, gtThreshold, hasGt, ltThreshold, hasLt,
+		"malformed_planning_time_spec", "differential_planning_time_mismatch")...)
+}
+
+// planningTimeGateReasons is the shared parse-and-compare tail behind both
+// the differential (matchPlanNodeTiming) and action-level
+// (matchActionPlanNodeTiming) planning-time gates. Both forms parse
+// got.Repr as EXPLAIN (FORMAT JSON) and emit the identical
+// "not > / not < threshold" comparison; pre-R4 the parse-error block and
+// the two comparison blocks were duplicated verbatim across the two
+// functions, differing only in the Reason.Code strings. Callers retain
+// their own threshold-resolution prologue (the differential form coerces
+// from `any` specs, the action form reads typed float fields) and pass the
+// already-resolved thresholds + active flags here.
+//
+// parseErrCode is the Reason.Code emitted when got.Repr is not parseable
+// EXPLAIN JSON; mismatchCode is emitted when a well-formed planning time
+// fails the gt/lt comparison. The gt/lt active flags must already account
+// for negative-threshold filtering — this helper only parses and compares.
+func planningTimeGateReasons(
+	branch string, got runner.ExecResult,
+	gtThreshold float64, gtActive bool, ltThreshold float64, ltActive bool,
+	parseErrCode, mismatchCode string,
+) []Reason {
 	seconds, err := parsePlanningTimeSeconds(got.Repr)
 	if err != nil {
-		out = append(out, Reason{
-			Code:    "malformed_planning_time_spec",
+		return []Reason{{
+			Code:    parseErrCode,
 			Message: fmt.Sprintf("%s output is not a parseable EXPLAIN (FORMAT JSON) document with a numeric \"Planning Time\" field: %v", branch, err),
-		})
-		return out
+		}}
 	}
 
-	if hasGt && !(seconds > gtThreshold) {
+	var out []Reason
+	if gtActive && !(seconds > gtThreshold) {
 		out = append(out, Reason{
-			Code:    "differential_planning_time_mismatch",
+			Code:    mismatchCode,
 			Message: fmt.Sprintf("%s planning time %.3fs is not > %.3fs", branch, seconds, gtThreshold),
 		})
 	}
-	if hasLt && !(seconds < ltThreshold) {
+	if ltActive && !(seconds < ltThreshold) {
 		out = append(out, Reason{
-			Code:    "differential_planning_time_mismatch",
+			Code:    mismatchCode,
 			Message: fmt.Sprintf("%s planning time %.3fs is not < %.3fs", branch, seconds, ltThreshold),
 		})
 	}
@@ -584,28 +609,9 @@ func matchActionPlanNodeTiming(branch string, a Assertion, got runner.ExecResult
 		return out
 	}
 
-	seconds, err := parsePlanningTimeSeconds(got.Repr)
-	if err != nil {
-		out = append(out, Reason{
-			Code:    "malformed_action_planning_time_spec",
-			Message: fmt.Sprintf("%s output is not a parseable EXPLAIN (FORMAT JSON) document with a numeric \"Planning Time\" field: %v", branch, err),
-		})
-		return out
-	}
-
-	if gtActive && !(seconds > a.PlanningTimeSecondsGt) {
-		out = append(out, Reason{
-			Code:    "action_planning_time_mismatch",
-			Message: fmt.Sprintf("%s planning time %.3fs is not > %.3fs", branch, seconds, a.PlanningTimeSecondsGt),
-		})
-	}
-	if ltActive && !(seconds < a.PlanningTimeSecondsLt) {
-		out = append(out, Reason{
-			Code:    "action_planning_time_mismatch",
-			Message: fmt.Sprintf("%s planning time %.3fs is not < %.3fs", branch, seconds, a.PlanningTimeSecondsLt),
-		})
-	}
-	return out
+	return append(out, planningTimeGateReasons(
+		branch, got, a.PlanningTimeSecondsGt, gtActive, a.PlanningTimeSecondsLt, ltActive,
+		"malformed_action_planning_time_spec", "action_planning_time_mismatch")...)
 }
 
 // matchActionOutputPattern evaluates the per-branch
