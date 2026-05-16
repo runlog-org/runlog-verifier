@@ -121,6 +121,44 @@ func validateInputs(inputs map[string]any) error {
 // to inspect (and to teardown) before os.RemoveAll.
 var ErrSetupScriptFailed = errors.New("runner: setup_script step exited non-zero")
 
+// toolAllowedLangs is the single source of truth for which step languages
+// each cassette.runtime.tool accepts. Adding a tool is one registry entry
+// here instead of a new near-identical arm in validateSteps' switch (the
+// previous shape duplicated the same "lang not in set → ErrSubprocessTool"
+// block five times). An empty Step.Lang defaults to "shell" before the
+// membership check (see effectiveLang), so every tool implicitly accepts
+// the empty spelling for its shell lang.
+var toolAllowedLangs = map[string]map[string]bool{
+	"shell":    {"shell": true},
+	"sqlite":   {"shell": true, "sql": true},
+	"postgres": {"shell": true, "sql": true},
+	"redis":    {"shell": true},
+	"docker":   {"shell": true},
+}
+
+// allowedLangsMessage renders a tool's accepted languages as a sorted,
+// comma-separated list for the ErrSubprocessTool message, so the diagnostic
+// stays in sync with toolAllowedLangs automatically.
+func allowedLangsMessage(tool string) string {
+	set := toolAllowedLangs[tool]
+	langs := make([]string, 0, len(set))
+	for l := range set {
+		langs = append(langs, l)
+	}
+	sort.Strings(langs)
+	return strings.Join(langs, ", ")
+}
+
+// effectiveLang resolves a step's language, applying the empty-defaults-to-
+// shell rule in one place. Previously hand-rolled identically in
+// validateSteps and execStep.
+func effectiveLang(s Step) string {
+	if s.Lang == "" {
+		return "shell"
+	}
+	return s.Lang
+}
+
 // SubprocessDriver executes setup+action steps in a workdir-rooted sandbox via
 // `sh -c` (shell) or `sqlite3` (sql) subprocesses.
 //
@@ -327,39 +365,14 @@ func (d SubprocessDriver) validateSteps(steps []Step, section string) error {
 			return fmt.Errorf("%w: step type %q (only \"code\" is supported)",
 				ErrLanguageUnsupported, s.Type)
 		}
-		lang := s.Lang
-		if lang == "" {
-			lang = "shell"
-		}
-		switch d.Tool {
-		case "shell":
-			if lang != "shell" {
-				return fmt.Errorf("%w: tool=shell requires lang=shell, got %q",
-					ErrSubprocessTool, s.Lang)
-			}
-		case "sqlite":
-			if lang != "shell" && lang != "sql" {
-				return fmt.Errorf("%w: tool=sqlite supports lang ∈ {shell, sql}, got %q",
-					ErrSubprocessTool, s.Lang)
-			}
-		case "postgres":
-			if lang != "shell" && lang != "sql" {
-				return fmt.Errorf("%w: tool=postgres supports lang ∈ {shell, sql}, got %q",
-					ErrSubprocessTool, s.Lang)
-			}
-		case "redis":
-			if lang != "shell" {
-				return fmt.Errorf("%w: tool=redis requires lang=shell, got %q",
-					ErrSubprocessTool, s.Lang)
-			}
-		case "docker":
-			if lang != "shell" {
-				return fmt.Errorf("%w: tool=docker requires lang=shell, got %q",
-					ErrSubprocessTool, s.Lang)
-			}
-		default:
+		allowed, ok := toolAllowedLangs[d.Tool]
+		if !ok {
 			return fmt.Errorf("%w: SubprocessDriver tool %q is not implemented",
 				ErrSubprocessTool, d.Tool)
+		}
+		if !allowed[effectiveLang(s)] {
+			return fmt.Errorf("%w: tool=%s supports lang ∈ {%s}, got %q",
+				ErrSubprocessTool, d.Tool, allowedLangsMessage(d.Tool), s.Lang)
 		}
 	}
 	return nil
@@ -390,10 +403,7 @@ func (d SubprocessDriver) mergeInputs(inputs map[string]any) map[string]any {
 // exitCode, err); err is reserved for environmental failures (timeout,
 // missing interpreter), exitCode for in-band step failures.
 func (d SubprocessDriver) execStep(s Step, inputs map[string]any, timeoutSec float64) (string, string, int, error) {
-	lang := s.Lang
-	if lang == "" {
-		lang = "shell"
-	}
+	lang := effectiveLang(s)
 	switch lang {
 	case "shell":
 		// Input values are DATA, not code — single-quote them so a value

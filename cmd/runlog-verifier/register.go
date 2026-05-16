@@ -54,6 +54,17 @@ const (
 // http.Client with the registerHTTPTimeout.
 var registerHTTPClient *http.Client
 
+// httpClient returns the test-injected registerHTTPClient when set, else a
+// fresh http.Client bounded by registerHTTPTimeout. Centralised so the
+// three register HTTP call sites (kickoff, status poll, pubkey upload) don't
+// each hand-roll the same nil-check + timeout-client construction.
+func httpClient() *http.Client {
+	if registerHTTPClient != nil {
+		return registerHTTPClient
+	}
+	return &http.Client{Timeout: registerHTTPTimeout}
+}
+
 // pollCadenceOverride lets tests bypass the real exponential backoff so
 // the polling loop completes in milliseconds rather than seconds. nil
 // means use the production cadence (2s, 2s, 3s, 5s, 5s, …).
@@ -274,11 +285,7 @@ func postRegisterCLI(server, email string, stderr io.Writer) (kickoffResponse, i
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := registerHTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: registerHTTPTimeout}
-	}
-	resp, err := client.Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		fmt.Fprintf(stderr, "register: could not reach %s: %v\n", server, err)
 		return kickoffResponse{}, registerExitNet
@@ -402,10 +409,7 @@ func pollRegisterStatus(server, token string, expiresInSeconds int, stderr io.Wr
 
 	fmt.Fprintln(stderr, "Waiting for verification...")
 
-	client := registerHTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: registerHTTPTimeout}
-	}
+	client := httpClient()
 
 	attempt := 0
 	// Track when we last printed a liveness dot so the user sees a tick
@@ -663,11 +667,7 @@ func postRegisterPubkey(endpoint, apiKey, pubB64 string) (*http.Response, []byte
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := registerHTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: registerHTTPTimeout}
-	}
-	resp, err := client.Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		return nil, nil, err
 	}
