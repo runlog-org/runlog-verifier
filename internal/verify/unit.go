@@ -4,9 +4,62 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/runlog-org/runlog-verifier/internal/verify/runner"
 )
+
+// pinSpecifierChars are version-specifier / range / wildcard characters that
+// must never appear in a python_packages exact pin. The schema enforces
+// exact pins upstream; this is server-parity defence on the CLI path which
+// has no upstream JSON Schema gate.
+const pinSpecifierChars = "<>~!,* "
+
+// checkPythonPackagesPlacement is a TIER-SPECIFIC pre-flight, run ALONGSIDE
+// (after) the universal shape check — never inside checkUniversalShape,
+// which must stay runtime-agnostic. It fires only when
+// verification.runtime.python_packages is declared:
+//
+//   - placed on anything other than tier:unit + isolation:function →
+//     rejected / python_packages_misplaced
+//   - any pin value that carries a range/specifier/wildcard char (or a
+//     leading >= / <= / ~= / != / > / <) → rejected /
+//     python_packages_invalid_pin
+//
+// Returns nil when there's nothing to validate (no python_packages) or the
+// declaration is well-placed and every pin is exact.
+func checkPythonPackagesPlacement(e *Entry, iso string) *Result {
+	if e.Verification.Runtime == nil || len(e.Verification.Runtime.PythonPackages) == 0 {
+		return nil
+	}
+	res := Result{UnitID: e.UnitID, Tier: "unit"}
+
+	if e.Verification.Type != "unit" || iso != "function" {
+		r := rejected(res, "python_packages_misplaced", fmt.Sprintf(
+			"verification.runtime.python_packages is only valid on a unit-tier "+
+				"function-isolation entry (got type=%q isolation=%q) — per-entry "+
+				"venv pinning has no meaning for any other tier/isolation",
+			e.Verification.Type, iso))
+		return &r
+	}
+
+	for name, val := range e.Verification.Runtime.PythonPackages {
+		v := strings.TrimPrefix(val, "==")
+		bad := strings.ContainsAny(v, pinSpecifierChars) ||
+			strings.HasPrefix(v, ">=") || strings.HasPrefix(v, "<=") ||
+			strings.HasPrefix(v, "~=") || strings.HasPrefix(v, "!=") ||
+			strings.HasPrefix(v, ">") || strings.HasPrefix(v, "<")
+		if bad {
+			r := rejected(res, "python_packages_invalid_pin", fmt.Sprintf(
+				"verification.runtime.python_packages[%q] = %q is not an exact "+
+					"pin — only `name: version` or `name: ==version` is allowed "+
+					"(no ranges, specifiers, or wildcards)",
+				name, val))
+			return &r
+		}
+	}
+	return nil
+}
 
 // unitSubprocessSupportedTools enumerates the verification.runtime.tool values
 // the unit-tier subprocess path can drive. Mirrors reexecuteSupportedTools but
@@ -55,6 +108,16 @@ func runUnit(e *Entry) Result {
 		iso = "function"
 	}
 
+	// F57 tier-specific pre-flight: python_packages is only meaningful on
+	// unit/function and must be exact pins. Runs ALONGSIDE the universal
+	// shape check (which already ran in Run, shape-first) — never inside
+	// checkUniversalShape, which stays runtime-agnostic. Ordered before
+	// dispatch so a misplaced/invalid declaration is rejected regardless
+	// of which isolation arm would otherwise handle the entry.
+	if r := checkPythonPackagesPlacement(e, iso); r != nil {
+		return *r
+	}
+
 	// subprocess isolation is dispatched ad-hoc rather than through
 	// runner.DriverFor: SubprocessDriver is stateful (per-branch
 	// Workdir), so a singleton-style registry doesn't fit. Mirrors the
@@ -80,6 +143,19 @@ func runUnit(e *Entry) Result {
 				"docker_daemon",
 			iso,
 		))
+	}
+
+	// F57: swap the stateless registry driver for a venv-aware one when
+	// the entry declares python_packages. The placement check above has
+	// already guaranteed iso == "function" + tier == unit when we get
+	// here with a non-empty pin set, so every subsequent driver.Run call
+	// — both branch runs AND the mutation re-run (it flows through
+	// baseline.Driver) — uses the pinned venv. With no python_packages
+	// the registry driver (zero-value PythonDriver) is left untouched,
+	// so existing entries verify byte-identically.
+	if iso == "function" && e.Verification.Runtime != nil &&
+		len(e.Verification.Runtime.PythonPackages) > 0 {
+		driver = runner.PythonDriver{PythonPackages: e.Verification.Runtime.PythonPackages}
 	}
 
 	prep, reason := prepareBranches(e, true)
@@ -193,6 +269,9 @@ func isEnvErr(err error) bool {
 // fix the entry to verify on this host); other errors are rejection.
 func runnerError(res Result, branch string, err error) Result {
 	switch {
+	case errors.Is(err, runner.ErrVenvProvisionFailed):
+		return tierUnsupported(res, "venv_provision_failed",
+			fmt.Sprintf("could not provision the per-entry python_packages venv (running %s): %v", branch, err))
 	case errors.Is(err, runner.ErrInterpreterMissing):
 		return tierUnsupported(res, "runtime_unavailable",
 			fmt.Sprintf("python3 is not installed on the verifier host (running %s): %v", branch, err))

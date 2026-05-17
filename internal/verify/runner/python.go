@@ -18,7 +18,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -57,9 +59,97 @@ func actionIsAsync(action []Step) bool {
 // caller's setup/action steps, and parses a single JSON object from
 // stdout into ExecResult.
 //
-// PythonDriver is a value receiver (no fields) so it's cheap to embed
-// in the registry and safe to share across goroutines.
-type PythonDriver struct{}
+// PythonDriver is a value receiver so it's cheap to embed in the registry
+// and safe to share across goroutines.
+//
+// PythonPackages (F57) is the per-entry venv pin set: name → exact pin
+// (value may carry a leading "=="). When non-empty, Run provisions an
+// ephemeral venv, pip-installs exactly these pins, runs the action with
+// that venv's interpreter, then tears the venv down. When nil/empty the
+// driver behaves byte-for-byte identically to the original (no-field)
+// PythonDriver: the bare `python3 -` path with zero venv overhead. Every
+// existing caller — the registry's PythonDriver{}, RunPython, and the
+// mutation re-run fallback — constructs the zero value, so back-compat is
+// guaranteed by the len()==0 guard at the top of the provisioning branch.
+type PythonDriver struct {
+	PythonPackages map[string]string
+}
+
+// venvProvisionTimeout is the floor for the pip-install phase. pip does
+// network I/O (index lookup + wheel download); letting the action's own
+// timeout_seconds (schema floor: > 0) starve it would misclassify a slow
+// download as a provisioning failure. The effective timeout is
+// max(actionTimeout, this) so a generous action timeout still wins.
+const venvProvisionTimeout = 120 * time.Second
+
+// normalizePin strips an optional single leading "==" so a value supplied
+// either as "1.16.0" or "==1.16.0" installs as name==1.16.0.
+func normalizePin(v string) string {
+	return strings.TrimPrefix(v, "==")
+}
+
+// provisionVenv creates an ephemeral venv under a fresh temp dir, pip-
+// installs every declared pin (package names iterated in lexical order
+// for deterministic install sequencing), and returns the venv's python
+// interpreter path plus a teardown func the caller MUST defer. On any
+// failure it removes the temp dir itself and returns a
+// ErrVenvProvisionFailed-wrapped error (stderr redacted).
+func provisionVenv(pkgs map[string]string, actionTimeout time.Duration) (pyPath string, teardown func(), err error) {
+	dir, err := os.MkdirTemp("", "runlog-venv-")
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: mkdtemp: %v", ErrVenvProvisionFailed, err)
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+
+	provTimeout := venvProvisionTimeout
+	if actionTimeout > provTimeout {
+		provTimeout = actionTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), provTimeout)
+	defer cancel()
+
+	var cstderr bytes.Buffer
+	create := exec.CommandContext(ctx, "python3", "-m", "venv", dir)
+	create.Stderr = &cstderr
+	if cerr := create.Run(); cerr != nil {
+		cleanup()
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", nil, fmt.Errorf("%w: `python3 -m venv` timed out after %s", ErrVenvProvisionFailed, provTimeout)
+		}
+		return "", nil, fmt.Errorf("%w: `python3 -m venv` failed: %v (stderr=%s)",
+			ErrVenvProvisionFailed, cerr, redactStderr(cstderr.Bytes()))
+	}
+
+	pip := filepath.Join(dir, "bin", "pip")
+	py := filepath.Join(dir, "bin", "python")
+
+	names := make([]string, 0, len(pkgs))
+	for name := range pkgs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	args := make([]string, 0, len(names)+1)
+	args = append(args, "install")
+	for _, name := range names {
+		args = append(args, name+"=="+normalizePin(pkgs[name]))
+	}
+
+	var pstderr bytes.Buffer
+	install := exec.CommandContext(ctx, pip, args...)
+	install.Stderr = &pstderr
+	if ierr := install.Run(); ierr != nil {
+		cleanup()
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", nil, fmt.Errorf("%w: `pip install` timed out after %s", ErrVenvProvisionFailed, provTimeout)
+		}
+		return "", nil, fmt.Errorf("%w: `pip install %s` failed: %v (stderr=%s)",
+			ErrVenvProvisionFailed, strings.Join(args[1:], " "), ierr, redactStderr(pstderr.Bytes()))
+	}
+
+	return py, cleanup, nil
+}
 
 // Run runs setup+action as a Python 3 subprocess with inputs bound
 // as locals. Each `$VARNAME` reference inside step bodies is rewritten
@@ -69,7 +159,7 @@ type PythonDriver struct{}
 //
 // inputs keys may be supplied with or without the `$` prefix; the
 // prefix is stripped before mangling.
-func (PythonDriver) Run(setup, action []Step, inputs map[string]any, timeoutSec float64) (ExecResult, error) {
+func (d PythonDriver) Run(setup, action []Step, inputs map[string]any, timeoutSec float64) (ExecResult, error) {
 	if len(action) == 0 {
 		return ExecResult{}, ErrEmptyAction
 	}
@@ -95,10 +185,24 @@ func (PythonDriver) Run(setup, action []Step, inputs map[string]any, timeoutSec 
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
+	// F57: when python_packages pins are declared, run the script with an
+	// ephemeral venv's interpreter instead of the host python3. The nil/
+	// empty guard keeps every existing caller on the byte-for-byte
+	// original path (interpreter stays "python3", no temp dir, no pip).
+	interpreter := "python3"
+	if len(d.PythonPackages) > 0 {
+		pyPath, teardown, perr := provisionVenv(d.PythonPackages, timeout)
+		if perr != nil {
+			return ExecResult{}, perr
+		}
+		defer teardown()
+		interpreter = pyPath
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "python3", "-")
+	cmd := exec.CommandContext(ctx, interpreter, "-")
 	cmd.Stdin = strings.NewReader(script)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

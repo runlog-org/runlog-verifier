@@ -62,6 +62,13 @@ var (
 	ErrTimeout             = errors.New("runner: subprocess timed out")
 	ErrDriverOutput        = errors.New("runner: driver output not parseable")
 	ErrEmptyAction         = errors.New("runner: action contains no steps")
+
+	// ErrVenvProvisionFailed signals that the per-entry venv could not be
+	// created or that `pip install` of the declared python_packages pins
+	// failed. The dispatcher maps this to tier_unsupported /
+	// venv_provision_failed (NOT rejected): the entry is well-formed but
+	// this host could not provision the pinned environment.
+	ErrVenvProvisionFailed = errors.New("runner: venv provisioning failed")
 )
 
 // Driver executes one branch's setup+action and returns a structured

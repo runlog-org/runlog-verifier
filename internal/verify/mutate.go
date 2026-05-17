@@ -773,6 +773,14 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 		return strategyUnsupportedReason(idx, m.Strategy), false
 	}
 
+	// venvFailed is set when a mutation re-run hits ErrVenvProvisionFailed
+	// (the per-entry F57 venv could not be re-provisioned for the rerun).
+	// That is a tier_unsupported condition, not a rejection — so the
+	// callback below records the reason and we return supported=false,
+	// routing through the caller's tierUnsupportedReasons branch with the
+	// venv_provision_failed code intact.
+	var venvFailed *Reason
+
 	reasons := forEachMutationBranch(m, idx, b, func(branch branchKind, baseline branchBaseline, expected mutationOutcome) []Reason {
 		mutInputs, mutSetup, mutAction, err := strat.apply(baseline, m)
 		if err != nil {
@@ -789,6 +797,18 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 		}
 		got, err := drv.Run(mutSetup, mutAction, mutInputs, b.Timeout)
 		if err != nil {
+			if errors.Is(err, runner.ErrVenvProvisionFailed) {
+				if venvFailed == nil {
+					venvFailed = &Reason{
+						Code: "venv_provision_failed",
+						Message: fmt.Sprintf(
+							"mutation #%d (%s) on %s: could not re-provision the "+
+								"per-entry python_packages venv: %v",
+							idx+1, m.Strategy, branch, err),
+					}
+				}
+				return nil
+			}
 			if isEnvErr(err) {
 				return []Reason{mutationRunnerErrorReason(idx, m, branch, err)}
 			}
@@ -803,6 +823,12 @@ func runOneMutation(e *Entry, b mutationBaseline, m Mutation, idx int) ([]Reason
 			idx, m, branch, got, baseline.Result, b.Diff,
 			expected, "source", baseline.Action, mutAction)
 	})
+	// A venv re-provision failure during the rerun is tier_unsupported,
+	// not a rejection: return supported=false with the venv reason so the
+	// caller routes through tierUnsupportedReasons.
+	if venvFailed != nil {
+		return []Reason{*venvFailed}, false
+	}
 	return reasons, true
 }
 

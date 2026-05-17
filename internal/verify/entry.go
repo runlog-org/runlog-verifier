@@ -62,6 +62,13 @@ type Verification struct {
 type RuntimeSpec struct {
 	Tool    string `yaml:"tool"`
 	Version string `yaml:"version"`
+
+	// PythonPackages mirrors verification.runtime.python_packages — a map of
+	// package name → exact pin (with or without a leading "=="). When non-
+	// empty on a function-isolation unit-tier entry, the verifier runs the
+	// Python action inside an ephemeral per-entry venv with exactly these
+	// pins installed. Empty/absent preserves the bare `python3 -` path.
+	PythonPackages map[string]string `yaml:"python_packages"`
 }
 
 // Mutation mirrors the per-mutation entry. Both expected_result and
