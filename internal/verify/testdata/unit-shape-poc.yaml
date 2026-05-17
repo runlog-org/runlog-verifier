@@ -62,4 +62,13 @@ verification:
       new_value: 99
       branch: working_approach
       expected_result: unchanged
+    # F36 discrimination: shrink $ITEMS to the empty range on the working
+    # branch — it now returns a length-1 list ([ValueError]) instead of
+    # length 6, so working_branch_must_return.length: 6 rejects. Proves the
+    # working assertion is load-bearing (no_discriminating_mutation guard).
+    - strategy: mutate_fixture
+      target: $ITEMS
+      new_value: { python_expr: "list(range(0))" }
+      branch: working_approach
+      expected_result: fail
   timeout_seconds: 5
