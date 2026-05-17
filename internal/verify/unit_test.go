@@ -6,9 +6,38 @@ import (
 	"testing"
 )
 
+// F36 lifted the five universal falsifiability shape checks to a
+// SHAPE-FIRST pre-flight for unit + integration tiers. Every entry that
+// reaches Run() for those tiers must now structurally satisfy schema
+// submission rules §1-3 + discrimination — the same bar runlog_submit
+// already enforces server-side. The unit-tier fixtures below therefore
+// carry a falsifiability tail: a mutate_fixture mutation (§1), a
+// fail-expecting one (§2), an unchanged-expecting one (§3), at least one
+// breaking the working_approach assertion (discrimination).
+//
+// Two shapes of tail appear here:
+//
+//   - greenTail / litTail / returnTail: the working branch genuinely
+//     reads the mutated token, so the "runlog_f36_break" string-break
+//     makes the working assertion fail for real (these feed verified-case
+//     or targeted-reject tests whose own mutation must still drive the
+//     asserted outcome — appended AFTER, so reason ordering is unaffected).
+//   - structTail: the entry never reaches mutation execution (rejected by
+//     differential / runtime-missing, or tier_unsupported), so only the
+//     §1-3+discrimination STRUCTURE matters; the target token need not
+//     resolve.
+//
+// To let the string-break actually break a literal-int return without
+// changing the differential, working bodies that returned a bare literal
+// are rebound through a differential input in a value-preserving way
+// (`$F36G + 0` still returns the same int; a string `$F36G` raises
+// TypeError → the working spec fails → outcome fail). The no-op restores
+// the original value → outcome unchanged.
+
 // unitGreenYAML is a minimal unit-tier entry that runs end-to-end through
-// the Python runner. Both branches assign $RESULT to a literal int and
-// the differential block expects exactly those values.
+// the Python runner. The working branch returns $F36G (= 22, bound via
+// the differential inputs) so the F36 falsifiability tail can break it;
+// `+ 0` keeps the return an int so the differential is unchanged.
 const unitGreenYAML = `
 unit_id: unit-runner-greenpath
 domain: [test]
@@ -23,16 +52,35 @@ working_approach:
   description: returns 22
   setup: []
   action:
-    - { type: code, lang: python, body: "$RESULT = 22" }
+    - { type: code, lang: python, body: "$RESULT = $F36G + 0" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: function
   differential:
+    inputs:
+      $F36G: 22
     failed_branch_must_return: { type: int, value_equals: 18 }
     working_branch_must_return: { type: int, value_equals: 22 }
+  mutations:` + greenTail + `
   timeout_seconds: 5
 `
+
+// greenTail is the F36 falsifiability tail for unitGreenYAML's $F36G
+// input (working branch returns $F36G + 0). The string break sets $F36G
+// to a non-int → `$F36G + 0` raises TypeError → working spec fails (§1 +
+// §2 + discrimination). The no-op restores 22 → unchanged (§3).
+const greenTail = `
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: 22
+      branch: working_approach
+      expected_result: unchanged`
 
 func skipIfNoPython3(t *testing.T) {
 	t.Helper()
@@ -153,17 +201,36 @@ working_approach:
   description: echoes success
   setup: []
   action:
-    - { type: code, lang: shell, body: "echo working-output" }
+    - { type: code, lang: shell, body: "echo $F36S" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: subprocess
   runtime: { tool: shell }
   differential:
+    inputs:
+      $F36S: working-output
     failed_branch_must_return: { type: string, value_equals: "failed-output\n" }
     working_branch_must_return: { type: string, value_equals: "working-output\n" }
+  mutations:` + shellTail + `
   timeout_seconds: 5
 `
+
+// shellTail is the F36 falsifiability tail for unitSubprocessShellYAML's
+// $F36S input (working branch echoes $F36S). The string break changes the
+// echoed line so it no longer matches working_branch_must_return → fail
+// (§1 + §2 + discrimination); the no-op restores it → unchanged (§3).
+const shellTail = `
+    - strategy: mutate_fixture
+      target: $F36S
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36S
+      new_value: working-output
+      branch: working_approach
+      expected_result: unchanged`
 
 func skipIfNoShell(t *testing.T) {
 	t.Helper()
@@ -209,13 +276,15 @@ working_approach:
   description: echoes success
   setup: []
   action:
-    - { type: code, lang: shell, body: "echo working-output" }
+    - { type: code, lang: shell, body: "echo $F36S" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: subprocess
   runtime: { tool: shell }
   differential:
+    inputs:
+      $F36S: working-output
     failed_branch_must_return: { type: string, value_equals: "failed-output\n" }
     working_branch_must_return: { type: string, value_equals: "working-output\n" }
   mutations:
@@ -230,7 +299,7 @@ verification:
       branch: failed_approach
       token: failed-output
       new_value: working-output
-      expected_branch_outcome: { failed_approach: fail }
+      expected_branch_outcome: { failed_approach: fail }` + shellTail + `
   timeout_seconds: 5
 `
 
@@ -371,14 +440,17 @@ working_approach:
   description: returns 22
   setup: []
   action:
-    - { type: code, lang: python, body: "$RESULT = 22" }
+    - { type: code, lang: python, body: "$RESULT = $F36G + 0" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: function
   differential:
+    inputs:
+      $F36G: 22
     failed_branch_must_raise: FAILED_RAISE_SPEC
     working_branch_must_return: { type: int, value_equals: 22 }
+  mutations:` + greenTail + `
   timeout_seconds: 5
 `
 
@@ -518,16 +590,129 @@ working_approach:
   description: configurable working body
   setup: []
   action:
-    - { type: code, lang: python, body: "WORKING_BODY" }
+    - { type: code, lang: python, body: "WORKING_BODY; $RESULT = $RESULT if isinstance($F36G, int) else $F36G + 0" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: function
   differential:
+    inputs:
+      $F36G: 0
     failed_branch_must_return: { type: int, value_equals: 0 }
     working_branch_must_return: WORKING_RETURN_SPEC
+  mutations:` + returnTail + `
   timeout_seconds: 5
 `
+
+// returnTail is the F36 falsifiability tail for unitReturnFixture. The
+// working body carries a value-preserving guard:
+// `$RESULT = $RESULT if isinstance($F36G, int) else $F36G + 0`. With the
+// no-op ($F36G=0) the guard is the identity (§3 unchanged). The string
+// break makes isinstance() false, so `$F36G + 0` raises TypeError → the
+// working spec fails regardless of which WORKING_RETURN_SPEC the test
+// substituted (§1 + §2 + discrimination).
+const returnTail = `
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged`
+
+// litTailN / litTailStr / litTailInput are F36 falsifiability tails for
+// the inline literal-binding tests, whose working branch is
+// `$RESULT = $LITERAL_1`. mutate_fixture rebinds $LITERAL_1 (an input
+// rebind always overrides a literal of the same name — the very property
+// TestRunUnitInputOverridesLiteral pins). The string break makes the
+// working spec fail (§1 + §2 + discrimination); the no-op restores the
+// test's effective working value so the outcome is unchanged (§3). Three
+// variants because the no-op must match each test's effective value:
+//   - litTailN     : numeric literal value 5
+//   - litTailStr   : string literal value "fixtures/probe-object"
+//   - litTailInput : differential input overrides $LITERAL_1 to 99
+const litTailN = `
+  mutations:
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: 5
+      branch: working_approach
+      expected_result: unchanged`
+
+const litTailStr = `
+  mutations:
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: 12345
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: "fixtures/probe-object"
+      branch: working_approach
+      expected_result: unchanged`
+
+const litTailInput = `
+  mutations:
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: 99
+      branch: working_approach
+      expected_result: unchanged`
+
+// pathGuard is appended to a path test's working body; pathTail is the
+// matching mutations block. The guard is value-preserving when $F36G is
+// the no-op int 0 (identity) and raises TypeError when $F36G is the
+// string break — so the working spec fails regardless of which dict
+// shape / path the test returns (§1 + §2 + §3 + discrimination). The
+// guard keeps $RESULT intact so the spec's `path:` resolution is
+// unaffected on the unmutated run.
+const pathGuard = `; $RESULT = $RESULT if isinstance($F36G, int) else $F36G + 0`
+
+const pathTail = `
+  mutations:
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged`
+
+// structTail satisfies §1-3 + discrimination structurally only. It is for
+// entries rejected (by the differential, before the mutation baseline at
+// runUnit's matchBranchOutcome gate) or tier_unsupported — the mutations
+// never execute, so the target token need not resolve and no body rebind
+// is required. Used by TestRunUnitPathMissingKey (rejected at the failed
+// branch's missing-key path resolution).
+const structTail = `
+  mutations:
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged`
 
 func applyReturnFixture(body, returnSpec string) string {
 	out := strings.Replace(unitReturnFixture, "WORKING_BODY", body, 1)
@@ -652,7 +837,7 @@ verification:
   isolation: function
   differential:
     failed_branch_must_return: { type: int, value_equals: 4 }
-    working_branch_must_return: { type: int, value_equals: 5 }
+    working_branch_must_return: { type: int, value_equals: 5 }` + litTailN + `
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -691,7 +876,7 @@ verification:
   isolation: function
   differential:
     failed_branch_must_return: { type: str, value_equals: "other" }
-    working_branch_must_return: { type: str, value_equals: "fixtures/probe-object" }
+    working_branch_must_return: { type: str, value_equals: "fixtures/probe-object" }` + litTailStr + `
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -732,7 +917,7 @@ verification:
     inputs:
       $LITERAL_1: 99
     failed_branch_must_return: { type: int, value_equals: 0 }
-    working_branch_must_return: { type: int, value_equals: 99 }
+    working_branch_must_return: { type: int, value_equals: 99 }` + litTailInput + `
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -772,7 +957,7 @@ verification:
   isolation: function
   differential:
     failed_branch_must_return: { type: int, value_equals: 0 }
-    working_branch_must_return: { type: int, value_equals: 5 }
+    working_branch_must_return: { type: int, value_equals: 5 }` + litTailN + `
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -800,14 +985,16 @@ working_approach:
   description: returns dict with str permissions
   setup: []
   action:
-    - { type: code, lang: python, body: "$RESULT = {'permissions': '022'}" }
+    - { type: code, lang: python, body: "$RESULT = {'permissions': '022'}` + pathGuard + `" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: function
   differential:
+    inputs:
+      $F36G: 0
     failed_branch_must_return: { type: int, value_equals: 18, path: permissions }
-    working_branch_must_return: { type: str, value_equals: '022', path: permissions }
+    working_branch_must_return: { type: str, value_equals: '022', path: permissions }` + pathTail + `
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -835,14 +1022,16 @@ working_approach:
   description: returns nested dict with int 42
   setup: []
   action:
-    - { type: code, lang: python, body: "$RESULT = {'a': {'b': 42}}" }
+    - { type: code, lang: python, body: "$RESULT = {'a': {'b': 42}}` + pathGuard + `" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: function
   differential:
+    inputs:
+      $F36G: 0
     failed_branch_must_return: { type: int, value_equals: 0, path: a.b }
-    working_branch_must_return: { type: int, value_equals: 42, path: a.b }
+    working_branch_must_return: { type: int, value_equals: 42, path: a.b }` + pathTail + `
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -877,7 +1066,7 @@ verification:
   isolation: function
   differential:
     failed_branch_must_return: { type: int, value_equals: 18, path: missing_key }
-    working_branch_must_return: { type: int, value_equals: 22 }
+    working_branch_must_return: { type: int, value_equals: 22 }` + structTail + `
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -908,14 +1097,16 @@ working_approach:
   description: returns dict with mixed items including ValueError
   setup: []
   action:
-    - { type: code, lang: python, body: "$RESULT = {'items': [ValueError('a'), 1, 2]}" }
+    - { type: code, lang: python, body: "$RESULT = {'items': [ValueError('a'), 1, 2]}` + pathGuard + `" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: function
   differential:
+    inputs:
+      $F36G: 0
     failed_branch_must_return: { length: 2, path: items }
-    working_branch_must_return: { length: 3, contains_exception_type: ValueError, path: items }
+    working_branch_must_return: { length: 3, contains_exception_type: ValueError, path: items }` + pathTail + `
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))

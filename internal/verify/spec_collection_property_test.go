@@ -350,16 +350,38 @@ working_approach:
   description: returns a list with no duplicates
   setup: []
   action:
-    - { type: code, lang: python, body: "class _L:\n    def __repr__(self): return 'x\\ny\\nz'\n$RESULT = _L()" }
+    - { type: code, lang: python, body: "_g = $F36G + 0\nclass _L:\n    def __repr__(self): return 'x\\ny\\nz'\n$RESULT = _L()" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: function
   differential:
+    inputs:
+      $F36G: 0
     failed_branch_collection_has_duplicates: true
     working_branch_collection_has_duplicates: false
+  mutations:` + collectionPropertyTail + `
   timeout_seconds: 5
 `
+
+// collectionPropertyTail is the F36 falsifiability tail for
+// unitCollectionPropertyYAML. The working body opens with `_g = $F36G + 0`
+// — a value-preserving guard when $F36G is the no-op int 0 (identity, the
+// repr is unchanged → §3) that raises TypeError when $F36G is the string
+// break, so the working branch fails to execute (§1 + §2 +
+// discrimination) regardless of which collection-property spec a test
+// substitutes (false in the Verified case, true in the Rejected case).
+const collectionPropertyTail = `
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged`
 
 // TestRunUnitCollectionPropertyVerified is the e2e green-path gate: a
 // synthetic unit-tier entry with collection-property specs verifies green

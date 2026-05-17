@@ -44,7 +44,7 @@ failed_approach:
         printf failed-side
   assertion:
     type: string
-    expect: success
+    expect: fail
 working_approach:
   description: echoes "working-side"
   setup: []
@@ -52,7 +52,7 @@ working_approach:
     - type: code
       lang: shell
       body: |
-        printf working-side
+        printf %s $F36S
   assertion:
     type: string
     expect: success
@@ -74,12 +74,25 @@ verification:
         ready_when:
           delay_seconds: 0.05
   differential:
+    inputs:
+      $F36S: working-side
     failed_branch_must_return:
       type: string
       value_equals: "failed-side"
     working_branch_must_return:
       type: string
       value_equals: "working-side"
+  mutations:
+    - strategy: mutate_fixture
+      target: $F36S
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36S
+      new_value: working-side
+      branch: working_approach
+      expected_result: unchanged
   timeout_seconds: 10
 `
 

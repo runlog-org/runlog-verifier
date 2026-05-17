@@ -151,8 +151,8 @@ verification:
     failed_branch_must_return: { type: string, value_equals: "" }
     working_branch_must_return: { type: string, value_equals: "" }
   mutations:
-    - { strategy: mutate_fixture, target: $X, new_value: 1, expected_result: unchanged }
-    - { strategy: mutate_fixture, target: $X, new_value: 2, expected_result: unchanged }
+    - { strategy: mutate_fixture, target: $X, new_value: 1, branch: working_approach, expected_result: fail }
+    - { strategy: mutate_fixture, target: $X, new_value: 2, branch: working_approach, expected_result: unchanged }
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))

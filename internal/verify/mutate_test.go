@@ -49,6 +49,32 @@ func buildMutationYAML(workingSpec, mutations string) string {
 	return strings.Replace(y, "__MUTATIONS__", mutations, 1)
 }
 
+// falsifiableTailX is a §1-3 + discrimination mutation tail for the
+// mutationBaseYAML family (fixture input $X, working branch returns $X).
+//
+// F36 lifted the universal falsifiability checks to every tier, so these
+// unit-tier fixtures must now carry a mutate_fixture mutation (§1), a
+// fail-expecting mutation (§2), an unchanged-expecting mutation (§3), and
+// at least one mutation that discriminates the working branch — the same
+// bar runlog_submit already enforces server-side. The string break sets
+// $X to a non-int, so the working assertion fails for EVERY working spec
+// these tests interpolate ({type:int}, {value_equals:N}, …); the tail
+// therefore executes identically regardless of the spec. The no-op
+// (current value 5) satisfies §3 without changing the outcome. Appended
+// after a test's own mutation so reason ordering and hasReason() lookups
+// for the mutation-under-test are unaffected.
+const falsifiableTailX = `
+    - strategy: mutate_fixture
+      target: $X
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $X
+      new_value: 5
+      branch: working_approach
+      expected_result: unchanged`
+
 func TestMutationFixtureExpectedFail(t *testing.T) {
 	skipIfNoPython3(t)
 	mutations := `
@@ -84,7 +110,7 @@ func TestMutationFixtureExpectedPass(t *testing.T) {
       branch: working_approach
       expected_result: pass
 `
-	yaml := buildMutationYAML("{ type: int }", mutations)
+	yaml := buildMutationYAML("{ type: int }", mutations+falsifiableTailX)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -104,7 +130,7 @@ func TestMutationFixtureExpectedUnchanged(t *testing.T) {
       branch: working_approach
       expected_result: unchanged
 `
-	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations)
+	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations+falsifiableTailX)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -125,7 +151,7 @@ func TestMutationOutcomeMismatch(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations)
+	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations+falsifiableTailX)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -185,6 +211,16 @@ verification:
       new_value: 42
       branch: working_approach
       expected_result: fail
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: 7
+      branch: working_approach
+      expected_result: unchanged
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -208,7 +244,7 @@ func TestMutationStrategyUnsupported(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations)
+	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations+falsifiableTailX)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -271,7 +307,7 @@ func TestMutationInapplicableSkipped(t *testing.T) {
       branch: working_approach
       expected_result: unchanged
 `
-	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations)
+	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations+falsifiableTailX)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -320,6 +356,50 @@ func buildSwapYAML(fn, workingSpec, mutations string) string {
 	return strings.Replace(y, "__MUTATIONS__", mutations, 1)
 }
 
+// falsifiableTailSwap is the §1-3 + discrimination tail for the
+// swapBaseYAML family. Unlike falsifiableTailX, swapBaseYAML has no
+// fixture input the working branch reads, so the discriminating break
+// must be a SOURCE mutation: swap_function_call rewrites the working
+// body's `sum` (every failing buildSwapYAML caller uses fn="sum") to an
+// undefined name, raising NameError → the working branch genuinely
+// fails (§2 + discrimination). The trailing mutate_fixture rebinds an
+// input the working body never reads, so the outcome is genuinely
+// unchanged (§1 mutate_fixture + §3 unchanged) without perturbing the
+// observable result. Each mutation is applied to the pristine baseline
+// independently, so appending after a test's own mutation leaves that
+// mutation's reasons/ordering untouched.
+const falsifiableTailSwap = `
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: sum
+      new_value: runlog_f36_undef
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36NOOP
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged`
+
+// falsifiableTailRemove is the §1-3 + discrimination tail for the
+// removeBaseYAML family. removeBaseYAML's working body is
+// `sorted([3, 1, 2], reverse=False)`; swapping `sorted` to an undefined
+// name raises NameError → genuine working failure (§2 +
+// discrimination). The trailing mutate_fixture rebinds an unread input
+// (§1 + §3 unchanged). Same independence property as falsifiableTailSwap.
+const falsifiableTailRemove = `
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: sorted
+      new_value: runlog_f36_undef
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36NOOP
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged`
+
 func TestMutationSwapFunctionCall(t *testing.T) {
 	skipIfNoPython3(t)
 	// Baseline working action: $RESULT = sum([1,2,3]) → 6. Spec accepts any
@@ -333,7 +413,7 @@ func TestMutationSwapFunctionCall(t *testing.T) {
       branch: working_approach
       expected_result: pass
 `
-	yaml := buildSwapYAML("sum", "{ type: int }", mutations)
+	yaml := buildSwapYAML("sum", "{ type: int }", mutations+falsifiableTailSwap)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -356,7 +436,7 @@ func TestMutationSwapFunctionCallExpectedFail(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations)
+	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations+falsifiableTailSwap)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -376,7 +456,7 @@ func TestMutationSwapFunctionCallTargetIsName(t *testing.T) {
       branch: working_approach
       expected_result: pass
 `
-	yaml := buildSwapYAML("sum", "{ type: int }", mutations)
+	yaml := buildSwapYAML("sum", "{ type: int }", mutations+falsifiableTailSwap)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -398,7 +478,7 @@ func TestMutationSwapIdentifier(t *testing.T) {
       branch: working_approach
       expected_result: pass
 `
-	yaml := buildSwapYAML("sum", "{ type: int }", mutations)
+	yaml := buildSwapYAML("sum", "{ type: int }", mutations+falsifiableTailSwap)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -448,6 +528,17 @@ verification:
       new_value: max
       branch: working_approach
       expected_result: unchanged
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: sum_check
+      new_value: runlog_f36_undef
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36NOOP
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -484,7 +575,7 @@ func TestMutationSwapInvalidShape(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations)
+	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations+falsifiableTailSwap)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -517,7 +608,7 @@ func TestMutationSwapNonStringNewValue(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations)
+	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations+falsifiableTailSwap)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -552,7 +643,7 @@ func TestMutationDifferentialFailureBlocks(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildMutationYAML("{ type: int, value_equals: 18 }", mutations)
+	yaml := buildMutationYAML("{ type: int, value_equals: 18 }", mutations+falsifiableTailX)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -621,7 +712,7 @@ func TestMutationRemoveKwargCleanRemoval(t *testing.T) {
       branch: working_approach
       expected_result: unchanged
 `
-	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations+falsifiableTailRemove)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -645,7 +736,7 @@ func TestMutationRemoveKwargBreakingTextLeavesSyntaxError(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations+falsifiableTailRemove)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -666,7 +757,7 @@ func TestMutationDropFlag(t *testing.T) {
       branch: working_approach
       expected_result: unchanged
 `
-	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations+falsifiableTailRemove)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -877,7 +968,7 @@ func TestMutationRemoveKwargInvalidShape(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations+falsifiableTailRemove)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -938,6 +1029,11 @@ verification:
       new_value: 5
       branch: working_approach
       expected_result: fail
+    - strategy: mutate_fixture
+      target: $SLEEP_SEC
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged
   timeout_seconds: 1
 `
 	res, err := Run([]byte(yaml))
@@ -970,7 +1066,7 @@ func TestMutationStrategyUnsupportedRemainsCustom(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations)
+	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations+falsifiableTailX)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1028,6 +1124,16 @@ verification:
         python_expr: "list(range(3))"
       branch: working_approach
       expected_result: pass
+    - strategy: mutate_fixture
+      target: $ITEMS
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $ITEMS
+      new_value: [1]
+      branch: working_approach
+      expected_result: unchanged
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yml))
@@ -1076,6 +1182,11 @@ verification:
         python_expr: "list(range(3))"
       branch: working_approach
       expected_result: fail
+    - strategy: mutate_fixture
+      target: $ITEMS
+      new_value: [1]
+      branch: working_approach
+      expected_result: unchanged
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yml))
@@ -1124,6 +1235,16 @@ verification:
         python_expr: "list(range(10))"
       branch: working_approach
       expected_result: fail
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: [1, 2, 3]
+      branch: working_approach
+      expected_result: unchanged
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yml))
@@ -1175,6 +1296,17 @@ verification:
       new_value: "== 999"
       branch: working_approach
       expected_result: fail
+    - strategy: swap_identifier
+      target: working_approach.action
+      token: "204"
+      new_value: "999"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36NOOP
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -1214,7 +1346,7 @@ func TestMutationSwapIdentifierUnknownTokenRejected(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations)
+	yaml := buildSwapYAML("sum", "{ type: int, value_equals: 6 }", mutations+falsifiableTailSwap)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1251,7 +1383,7 @@ func TestMutationRemoveKwargUnknownTokenRejected(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations)
+	yaml := buildRemoveYAML("{ type: list, value_equals: [1, 2, 3] }", mutations+falsifiableTailRemove)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1312,6 +1444,28 @@ func buildDiscrimYAML(mutations string) string {
 	return strings.Replace(discrimYAML, "__MUTATIONS__", mutations, 1)
 }
 
+// falsifiableTailDiscrim is the §1-3 + discrimination tail for the
+// discrimYAML family. discrimYAML's working body is
+// `result = sum([1,2,3]); $RESULT = result` with spec value_equals: 6.
+// swap_function_call sum→max yields max([1,2,3])=3 ≠ 6, so the working
+// branch genuinely fails the spec (§2 + discrimination) — a real
+// behavioural change, distinct from the consistent-rename no-op the
+// discrimination tests probe. The trailing mutate_fixture rebinds an
+// unread input (§1 + §3 unchanged). Independent per-mutation
+// application keeps a test's own mutation reasons untouched.
+const falsifiableTailDiscrim = `
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: sum
+      new_value: max
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36NOOP
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged`
+
 func TestMutationConsistentRenameDoesNotDiscriminate(t *testing.T) {
 	skipIfNoPython3(t)
 	// swap_identifier rewrites both occurrences of `result` to `outcome`.
@@ -1327,7 +1481,7 @@ func TestMutationConsistentRenameDoesNotDiscriminate(t *testing.T) {
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildDiscrimYAML(mutations)
+	yaml := buildDiscrimYAML(mutations + falsifiableTailDiscrim)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1374,7 +1528,7 @@ func TestMutationConsistentRenameExpectedUnchangedIsLegitimate(t *testing.T) {
       branch: working_approach
       expected_result: unchanged
 `
-	yaml := buildDiscrimYAML(mutations)
+	yaml := buildDiscrimYAML(mutations + falsifiableTailDiscrim)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1404,7 +1558,7 @@ func TestMutationInputSubstUnchangedDoesNotTriggerDiscriminationHint(t *testing.
       branch: working_approach
       expected_result: fail
 `
-	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations)
+	yaml := buildMutationYAML("{ type: int, value_equals: 5 }", mutations+falsifiableTailX)
 	res, err := Run([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)

@@ -772,8 +772,24 @@ func TestMutationCassetteResponseClonePreservesBaseline(t *testing.T) {
       new_value: 418
       branch: working_approach
       expected_result: fail
+    - strategy: mutate_fixture
+      target: $LITERAL_NOOP
+      new_value: 1
+      branch: working_approach
+      expected_result: unchanged
 `
-	yml := buildCassetteResponseYAML(mutations)
+	// F36: the universal shape pre-flight now requires a mutate_fixture
+	// mutation (§1) and an unchanged-expecting mutation (§3) on every
+	// integration entry. The two cassette-response fail mutations already
+	// cover §2 and discrimination; the sentinel literal NOOP (referenced
+	// by neither branch) satisfies §1 + §3 without touching baseline.
+	yml := buildCassetteResponseYAML(mutations) + `
+literals:
+  $LITERAL_NOOP:
+    value: 1
+    reason: sentinel literal not referenced by either branch
+    category: public_constant
+`
 	res, err := Run([]byte(yml))
 	if err != nil {
 		t.Fatalf("Run: %v", err)

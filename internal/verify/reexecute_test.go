@@ -90,6 +90,11 @@ verification:
   mutations:
     - { strategy: mutate_fixture, target: $X, new_value: 1, expected_result: unchanged }
     - { strategy: mutate_fixture, target: $X, new_value: 2, expected_result: unchanged }
+    - strategy: mutate_fixture
+      target: $X
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -179,6 +184,11 @@ verification:
   mutations:
     - { strategy: mutate_fixture, target: $X, new_value: 1, expected_result: unchanged }
     - { strategy: mutate_fixture, target: $X, new_value: 2, expected_result: unchanged }
+    - strategy: mutate_fixture
+      target: $X
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -225,6 +235,11 @@ verification:
   mutations:
     - { strategy: mutate_fixture, target: $X, new_value: 1, expected_result: unchanged }
     - { strategy: mutate_fixture, target: $X, new_value: 2, expected_result: unchanged }
+    - strategy: mutate_fixture
+      target: $X
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -275,6 +290,11 @@ verification:
   mutations:
     - { strategy: mutate_fixture, target: $X, new_value: 1, expected_result: unchanged }
     - { strategy: mutate_fixture, target: $X, new_value: 2, expected_result: unchanged }
+    - strategy: mutate_fixture
+      target: $X
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
   timeout_seconds: 5
 `
 	res, err := Run([]byte(yaml))
@@ -935,6 +955,24 @@ verification:
     working_branch_must_return:
       type: string
       value_equals: "WORLD"
+  mutations:
+    # §1 mutate_fixture + §3 unchanged: add an unrelated file into the
+    # materialized $SOURCE_PATH directory. The working branch reads only
+    # hello.txt, so its "WORLD" assertion is unaffected.
+    - strategy: mutate_fixture
+      target: $SOURCE_PATH
+      action: add_new_file
+      expected_result: unchanged
+    # §2 + discriminating fail on the working branch: collapse the
+    # upper-casing pipe by swapping tr to cat. Working now returns
+    # "world", not "WORLD", so value_equals rejects, outcome fail. This
+    # proves the tr step is what made the working branch pass.
+    - strategy: swap_function_call
+      target: working_approach.action
+      token: tr
+      new_value: cat
+      branch: working_approach
+      expected_result: fail
   timeout_seconds: 10
 `
 
