@@ -373,16 +373,40 @@ working_approach:
   description: returns simulated Bitmap Index Scan plan output
   setup: []
   action:
-    - { type: code, lang: python, body: "$RESULT = 'Bitmap Index Scan on idx_gin (cost=0.00..12.34)'" }
+    - { type: code, lang: python, body: "$RESULT = ('Bitmap Index Scan on idx_gin (cost=0.00..12.34)' if isinstance($F36G, int) else 'runlog_f36_break')" }
   assertion: { type: returns, expect: success }
 verification:
   type: unit
   isolation: function
   differential:
+    inputs:
+      $F36G: 0
     failed_branch_must_contain_plan_node: "Seq Scan"
     working_branch_must_contain_plan_node_any: ["Bitmap Index Scan", "Index Scan"]
+  mutations:` + planNodeTail + `
   timeout_seconds: 5
 `
+
+// planNodeTail is the F36 falsifiability tail for unitPlanNodeYAML. The
+// working body is value-preserving when $F36G is the no-op int 0
+// (renders the real "Bitmap Index Scan…" plan output) and degrades to a
+// needle-free string when $F36G is the string break. So the break makes
+// the working plan_node containment assertion fail (§1 + §2 +
+// discrimination) regardless of which needle list a test substitutes,
+// and the no-op leaves the baseline outcome unchanged (§3) — verified
+// when the list matches, still-mismatched when the Rejected test swaps
+// it to ["Hash Join","Merge Join"].
+const planNodeTail = `
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: "runlog_f36_break"
+      branch: working_approach
+      expected_result: fail
+    - strategy: mutate_fixture
+      target: $F36G
+      new_value: 0
+      branch: working_approach
+      expected_result: unchanged`
 
 // TestRunUnitPlanNodeContainmentVerified is the e2e gate: a synthetic
 // unit-tier entry with plan_node containment specs verifies green through

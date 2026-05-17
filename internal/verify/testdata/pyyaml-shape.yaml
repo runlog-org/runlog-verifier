@@ -101,4 +101,21 @@ verification:
     target: yaml.safe_load
     new_value: yaml.load
     expected_result: fail
+  # F36 discrimination: feed the working branch an integer-permissions doc.
+  # safe_load yields {permissions: 999} (int 999), so working_branch_must_
+  # return (type: str, value_equals: "022") rejects — proves the working
+  # assertion is load-bearing.
+  - strategy: mutate_fixture
+    target: working_approach.$INPUT
+    new_value: 'permissions: 999'
+    branch: working_approach
+    expected_result: fail
+  # F36 §3: re-setting the working input to its current quoted form is a
+  # no-op — safe_load still yields {permissions: "022"}, the working spec
+  # still passes, outcome unchanged.
+  - strategy: mutate_fixture
+    target: working_approach.$INPUT
+    new_value: 'permissions: "022"'
+    branch: working_approach
+    expected_result: unchanged
   timeout_seconds: 5

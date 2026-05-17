@@ -89,4 +89,13 @@ verification:
       new_value: cat
       branch: working_approach
       expected_result: fail
+    # F36 §3: re-setting $LITERAL_1 to its current value "abc" is a no-op —
+    # the setup_script writes the same file content, both branches return
+    # their canonical values, neither must_return spec moves. Satisfies the
+    # universal "at least one unchanged mutation" rule without perturbing
+    # the seed's behaviour.
+    - strategy: mutate_fixture
+      target: $LITERAL_1
+      new_value: abc
+      expected_result: unchanged
   timeout_seconds: 10
